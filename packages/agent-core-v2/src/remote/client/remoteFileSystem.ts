@@ -109,15 +109,15 @@ export class RemoteFileSystem implements IHostFileSystem {
   }
 
   async readBytes(path: string, n?: number, offset = 0): Promise<Uint8Array> {
-    if (n !== undefined) {
-      const result = await this.readRange(path, offset, n);
-      return decodeBase64(result.dataBase64);
-    }
+    if (n === 0) return new Uint8Array(0);
     const chunks: Uint8Array[] = [];
     let total = 0;
     for await (const chunk of this.readChunks(path, offset)) {
-      chunks.push(chunk);
-      total += chunk.byteLength;
+      const length = n === undefined ? chunk.byteLength : Math.min(chunk.byteLength, n - total);
+      if (length === 0) break;
+      chunks.push(chunk.subarray(0, length));
+      total += length;
+      if (total === n) break;
     }
     const out = new Uint8Array(total);
     let position = 0;

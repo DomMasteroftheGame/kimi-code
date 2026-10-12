@@ -120,9 +120,9 @@ describe('EditTool', () => {
     disposables.dispose();
   });
 
-  it('exposes before/after on the file_io display so the approval panel can render a diff', () => {
+  it('exposes before/after on the file_io display so the approval panel can render a diff', async () => {
     const tool = buildTool(createSpiedEditFs().fs, createTestEnv(), PERMISSIVE_WORKSPACE);
-    const execution = tool.resolveExecution({
+    const execution = await tool.resolveExecution({
       path: '/tmp/foo.ts',
       old_string: 'a\nb\nc',
       new_string: 'a\nB\nc',
@@ -139,9 +139,9 @@ describe('EditTool', () => {
     });
   });
 
-  it('declares readWriteFile access for the edited path', () => {
+  it('declares readWriteFile access for the edited path', async () => {
     const tool = buildTool(createSpiedEditFs().fs, createTestEnv(), PERMISSIVE_WORKSPACE);
-    const execution = tool.resolveExecution({
+    const execution = await tool.resolveExecution({
       path: '/tmp/foo.ts',
       old_string: 'a',
       new_string: 'b',

@@ -1,4 +1,4 @@
-Read a text file from the local filesystem.
+Read a text file from the active environment's filesystem.
 
 The path may be a `kimi-file://` attachment reference. Its bytes come from the current session's storage, independently of the workspace environment. Next Read keeps the reference so pagination also works after a fork. For a binary attachment, the error includes a server-local path when available; a converter must be able to access that filesystem. ReadMediaFile accepts the same reference for images and videos.
 

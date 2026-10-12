@@ -185,7 +185,7 @@ describe('RemoteEnvironmentProviderFactory', () => {
     const connected = registry.current('dev-box')!;
     expect(connected).toBe(placeholder);
     expect(connected.status).toBe('ready');
-    expect(connected.identity.generation).toBe(generation);
+    expect(connected.identity.generation).not.toBe(generation);
     const lease = registry.acquire({ environmentId: 'dev-box' }, ['fs']);
     expect(lease.environment).toBe(connected);
     lease.dispose();
@@ -569,11 +569,12 @@ describe('shared connection', () => {
     await Promise.all([target.connect!(), target.connect!()]);
     expect(connect).toHaveBeenCalledTimes(2);
     expect(target.status).toBe('ready');
-    expect(target.identity.generation).toBe(generation);
+    const reconnectedGeneration = target.identity.generation;
+    expect(reconnectedGeneration).not.toBe(generation);
     produced[1]!.setStatus('disconnected');
     await target.connect!();
     expect(connect).toHaveBeenCalledTimes(3);
-    expect(target.identity.generation).toBe(generation);
+    expect(target.identity.generation).not.toBe(reconnectedGeneration);
     await attachment.dispose();
     await registry.dispose();
   });
@@ -679,6 +680,29 @@ describe('declaration watch', () => {
     await registry.dispose();
   });
 
+  it('keeps the live connection when only defaultCwd changes', async () => {
+    const registry = new EnvironmentRegistry();
+    const config = watchableConfigService({
+      'dev-box': { type: 'ssh', host: 'dev-box', defaultCwd: '/home/me' },
+    });
+    const connect = vi.fn(async (options: RemoteEnvironmentOptions) => connectedEnvironment(options, 'connected-1'));
+    const factory = new RemoteEnvironmentProviderFactory(factoryOptions({ connect }));
+    const attachment = await factory.attach(fakeHost(baseServices({ config: config.service }), registry));
+
+    const before = registry.current('dev-box')!;
+    await before.connect!();
+    const generation = before.identity.generation;
+    config.setSection({ 'dev-box': { type: 'ssh', host: 'dev-box', defaultCwd: '/elsewhere' } });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(before.identity.generation).toBe(generation);
+    expect(before.status).toBe('ready');
+    expect(connect).toHaveBeenCalledTimes(1);
+
+    await attachment.dispose();
+    await registry.dispose();
+  });
+
   it('drains an in-use environment on removal: held leases keep their environment, new acquires fail, no local fallback', async () => {
     const registry = new EnvironmentRegistry();
     const config = watchableConfigService({
@@ -708,8 +732,11 @@ describe('declaration watch', () => {
     );
 
     expect(lease.environment).toBe(connected);
-    expect((produced[0]! as unknown as { disposed: boolean }).disposed).toBe(true);
+    expect((produced[0]! as unknown as { disposed: boolean }).disposed).toBe(false);
     lease.dispose();
+    await vi.waitFor(() => {
+      expect((produced[0]! as unknown as { disposed: boolean }).disposed).toBe(true);
+    });
 
     await attachment.dispose();
     await registry.dispose();

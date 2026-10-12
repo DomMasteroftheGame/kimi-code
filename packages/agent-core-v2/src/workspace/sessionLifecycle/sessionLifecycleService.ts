@@ -260,7 +260,10 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
     const metaScope = sessionScope;
     await Promise.all([this.config.ready, this.models.ready, this.providers.ready]);
     await this.workspaceDirs.ready;
-    await this.workspaceDirs.mergeAdditionalDirs(opts.workDir, opts.additionalDirs ?? []);
+    const additionalDirBase = opts.environmentId === undefined || opts.environmentId === LOCAL_ENVIRONMENT_ID
+      ? opts.workDir
+      : opts.environmentCwd ?? opts.workDir;
+    await this.workspaceDirs.mergeAdditionalDirs(additionalDirBase, opts.additionalDirs ?? []);
     const ctx: ISessionContext = {
       _serviceBrand: undefined,
       sessionId: opts.sessionId,

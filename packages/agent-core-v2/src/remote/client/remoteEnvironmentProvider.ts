@@ -161,6 +161,7 @@ class DeclaredRemoteEnvironment implements Environment {
 
   private install(session: RemoteEnvironment): void {
     const previous = this.session;
+    this.generation = `${this.environmentId}-${randomUUID()}`;
     this.session = session;
     this.sessionSubscription?.dispose();
     this.sessionSubscription = session.onDidChangeStatus((status) => {
@@ -246,7 +247,7 @@ export class RemoteEnvironmentProviderFactory implements EnvironmentProviderFact
         }
         for (const declaration of resolved.entries) {
           if (disposed) throw new Error('remote environment provider is disposed');
-          const fingerprint = declarationFingerprint(declaration.entry);
+          const fingerprint = declarationFingerprint(toLauncherSpec(declaration.entry));
           const record = records.get(declaration.id);
           if (record === undefined) {
             try {
@@ -294,8 +295,9 @@ export class RemoteEnvironmentProviderFactory implements EnvironmentProviderFact
     host: EnvironmentProviderHost,
     declaration: RemoteEnvironmentDeclaration,
   ): DeclaredEnvironmentRecord {
-    const fingerprint = declarationFingerprint(declaration.entry);
-    const environment = new DeclaredRemoteEnvironment(declaration.id, toLauncherSpec(declaration.entry), fingerprint, (launcher) => this.open(declaration.id, launcher));
+    const launcher = toLauncherSpec(declaration.entry);
+    const fingerprint = declarationFingerprint(launcher);
+    const environment = new DeclaredRemoteEnvironment(declaration.id, launcher, fingerprint, (nextLauncher) => this.open(declaration.id, nextLauncher));
     try {
       return { handle: host.registerEnvironment(environment), environment, declaration, fingerprint };
     } catch (error) {
@@ -317,8 +319,8 @@ export class RemoteEnvironmentProviderFactory implements EnvironmentProviderFact
   }
 }
 
-function declarationFingerprint(entry: RemoteEnvironmentEntry): string {
-  return JSON.stringify(sortKeysDeep(entry));
+function declarationFingerprint(launcher: LauncherSpec): string {
+  return JSON.stringify(sortKeysDeep(launcher));
 }
 
 function sortKeysDeep(value: unknown): unknown {

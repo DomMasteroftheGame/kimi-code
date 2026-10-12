@@ -98,7 +98,7 @@ describe('environment architecture boundaries', () => {
     expect(terminal).not.toMatch(/@IHostTerminalService/);
     expect(mcp).toContain('environmentResolver: this.environmentResolver');
     expect(mcp).not.toMatch(/@IHost(?:FileSystem|FsWatchService|ProcessService|TerminalService)/);
-    expect(externalFs).toContain('get(IEnvironmentService).acquire(');
+    expect(externalFs).toContain('createEnvironmentFs(');
     expect(externalFs).not.toContain('environmentWorkspaceId');
   });
 });

@@ -25,8 +25,12 @@ interface Entry {
   environment: Environment;
   readonly resources: Set<TrackedResource>;
   readonly statusSubscription: { dispose(): void };
+  activeLeases: number;
+  readonly drainResolvers: Set<() => void>;
   closed: boolean;
 }
+
+const ENVIRONMENT_DRAIN_TIMEOUT_MS = 5000;
 
 export interface EnvironmentRegistryChange {
   readonly environmentId: string;
@@ -132,7 +136,7 @@ export class EnvironmentRegistry {
     if (previous === undefined) return;
     this.entries.delete(environmentId);
     this.changeEmitter.fire({ environmentId });
-    await this.retire(previous);
+    await this.retire(previous, true);
   }
 
   async acquireWhenReady(binding: EnvironmentBinding, required: readonly EnvironmentCapability[] = []): Promise<EnvironmentLease> {
@@ -161,6 +165,7 @@ export class EnvironmentRegistry {
         throw new EnvironmentError('environment.capability_unavailable', `environment ${binding.environmentId} does not provide ${capability}`);
       }
     }
+    entry.activeLeases += 1;
     let active = true;
     return {
       environment: entry.environment,
@@ -192,7 +197,13 @@ export class EnvironmentRegistry {
         });
       },
       dispose: () => {
+        if (!active) return;
         active = false;
+        entry.activeLeases -= 1;
+        if (entry.activeLeases === 0) {
+          for (const resolve of entry.drainResolvers) resolve();
+          entry.drainResolvers.clear();
+        }
       },
     };
   }
@@ -231,6 +242,8 @@ export class EnvironmentRegistry {
     const entry: Entry = {
       environment,
       resources: new Set(),
+      activeLeases: 0,
+      drainResolvers: new Set(),
       closed: false,
       statusSubscription: environment.onDidChangeStatus((status) => {
         if (!entry.closed && this.entries.get(environment.identity.environmentId) === entry) {
@@ -256,10 +269,11 @@ export class EnvironmentRegistry {
     }
   }
 
-  private async retire(entry: Entry): Promise<void> {
+  private async retire(entry: Entry, drain = false): Promise<void> {
     if (entry.closed) return;
     entry.closed = true;
     entry.statusSubscription.dispose();
+    if (drain) await this.waitForDrain(entry);
     const records = [...entry.resources].toReversed();
     entry.resources.clear();
     for (const record of records) {
@@ -268,6 +282,21 @@ export class EnvironmentRegistry {
       } catch {}
     }
     await entry.environment.dispose();
+  }
+
+  private async waitForDrain(entry: Entry): Promise<void> {
+    if (entry.activeLeases === 0) return;
+    let timeout: NodeJS.Timeout | undefined;
+    await Promise.race([
+      new Promise<void>((resolve) => {
+        entry.drainResolvers.add(resolve);
+      }),
+      new Promise<void>((resolve) => {
+        timeout = setTimeout(resolve, ENVIRONMENT_DRAIN_TIMEOUT_MS);
+      }),
+    ]);
+    if (timeout !== undefined) clearTimeout(timeout);
+    entry.drainResolvers.clear();
   }
 }
 

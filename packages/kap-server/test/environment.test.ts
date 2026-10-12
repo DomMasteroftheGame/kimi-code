@@ -170,6 +170,30 @@ describe('server-v2 /api/v1 environment routes', () => {
       expect(byId.get('loop')?.connect_error).toBeUndefined();
     });
 
+    it('keeps legacy runtime routes on the same binding', async () => {
+      const id = await createSession();
+      const initial = await call<{ workspace_id: string; runtime_id: string }>(
+        'GET',
+        `/api/v1/sessions/${id}/runtime`,
+      );
+      expect(initial.body.code).toBe(0);
+      expect(initial.body.data.runtime_id).toBe('local');
+
+      const switched = await call<{ workspace_id: string; runtime_id: string }>(
+        'POST',
+        `/api/v1/sessions/${id}/runtime`,
+        { runtime_id: 'loop' },
+      );
+      expect(switched.body.code).toBe(0);
+      expect(switched.body.data).toEqual({
+        workspace_id: initial.body.data.workspace_id,
+        runtime_id: 'loop',
+      });
+
+      const binding = await call<EnvironmentBindingWire>('GET', `/api/v1/sessions/${id}/environment`);
+      expect(binding.body.data.environment_id).toBe('loop');
+    }, 90_000);
+
     it('creates a session bound to a declared environment via POST /sessions', async () => {
       const created = await call<SessionWire>('POST', '/api/v1/sessions', {
         metadata: { cwd: home as string },

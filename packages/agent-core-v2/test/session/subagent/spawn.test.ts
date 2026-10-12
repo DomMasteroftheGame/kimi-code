@@ -71,6 +71,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
   let createAgent: ReturnType<typeof vi.fn>;
   let forkAgent: ReturnType<typeof vi.fn>;
   let acquireEnvironment: ReturnType<typeof vi.fn>;
+  let acquireWhenReadyEnvironment: ReturnType<typeof vi.fn>;
   let callerPermissionMode: { mode: string; setMode: ReturnType<typeof vi.fn> };
   let createdPermissionMode: { mode: string; setMode: ReturnType<typeof vi.fn> };
   let callerUserTools: IAgentUserToolService;
@@ -152,6 +153,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
       dispose: vi.fn(),
     };
     acquireEnvironment = vi.fn(() => lease);
+    acquireWhenReadyEnvironment = vi.fn(async () => lease);
     callerBinding = { environmentId: 'acp:s1' };
     caller = {
       id: CALLER_ID,
@@ -165,6 +167,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
             return {
               _serviceBrand: undefined,
               acquire: acquireEnvironment,
+              acquireWhenReady: acquireWhenReadyEnvironment,
             };
           }
           if (serviceId === IAgentEnvironmentBindingService) {
@@ -636,6 +639,14 @@ describe('SessionSubagentService planSpawn and spawn', () => {
     expect(createAgent).toHaveBeenCalledWith(expect.objectContaining({ environmentId: 'acp:s1' }));
   });
 
+  it('reconnects the caller environment before spawning a non-fork child', async () => {
+    const svc = service();
+
+    await spawnNonForkChild(svc);
+
+    expect(acquireWhenReadyEnvironment).toHaveBeenCalledWith(['process']);
+  });
+
   it('inherits the caller binding when the requested environment matches the current one', async () => {
     callerBinding = { environmentId: 'acp:s1', cwd: '/remote/repo' };
     const svc = service();
@@ -788,7 +799,7 @@ describe('SessionSubagentService planSpawn and spawn', () => {
   });
 
   it('spawn throws before creating anything when the caller environment lease fails', async () => {
-    acquireEnvironment.mockImplementation(() => {
+    acquireWhenReadyEnvironment.mockImplementation(() => {
       throw new Error('process capability is no longer available');
     });
     const svc = service();

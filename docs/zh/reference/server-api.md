@@ -568,10 +568,7 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 | `GET /api/v1/sessions/{session_id}/goal` | 当前目标快照（无则 `null`） |
 | `GET /api/v1/sessions/{session_id}/warnings` | 会话级告警 |
 | `GET /api/v1/sessions/{session_id}/environment` | 读取 main agent 的环境绑定 |
-| `POST /api/v1/sessions/{session_id}/environment` | 切换 main agent 的环境绑定 |
-| `POST /api/v1/sessions/{session_id}/environment/reconnect` | 重连已绑定的环境 |
 | `GET /api/v1/sessions/{session_id}/environments` | 列出会话工作区已注册的环境 |
-| `POST /api/v1/sessions/{session_id}/environments` | 为会话工作区声明环境 |
 | `POST /api/v1/sessions/{session_id}/export` | 导出会话与诊断信息（zip 流，不走信封） |
 | `GET /api/v1/sessions/{session_id}/snapshot` | 客户端重建用全量快照（含 `as_of_seq` 与 `epoch`） |
 | `GET /api/v1/sessions/{session_id}/media/{file_id}` | 按文件 id 下载提示词媒体（二进制） |
@@ -850,38 +847,6 @@ main agent 的实时状态汇总；读取它会在会话为冷态时将其恢复
 
 - `40401`：会话不存在
 
-#### `POST /api/v1/sessions/{session_id}/environment`
-
-切换 main agent 的环境绑定。新绑定持久化之前会先建立连接，并用目标文件系统校验给定的 `cwd`——失败时保留原绑定。切换成功后立即生效：会话的下一次工具调用就已在新环境上执行。功能介绍见 [远程环境](../guides/remote-environment.md)。
-
-| 参数 | 位置 | 类型 | 说明 |
-| --- | --- | --- | --- |
-| `session_id` | path | string | **必填。** 会话 id |
-| `environment_id` | body | string | **必填。** 目标环境 id |
-| `cwd` | body | string | 目标环境上的工作目录；非 `local` 环境必填（缺省时返回 `40001`）——条目的 `defaultCwd` 仅在创建会话绑定该环境时生效 |
-
-成功时，`data` 为新的绑定 `{ workspace_id, environment_id, cwd? }`。
-
-- `40001`：非 `local` 的 `environment_id` 未提供 `cwd`，或给定的 `cwd` 在目标环境上不是有效目录
-- `40401`：会话不存在
-- `40420`：不存在该 `environment_id` 的环境
-- `40901`：会话有正在执行的工具调用或待审批调用，切换被拒绝——待轮次结束后重试
-- `40926`：环境存在但不可用
-
-#### `POST /api/v1/sessions/{session_id}/environment/reconnect`
-
-在断连后显式重连 main agent 已绑定的环境。绑定绝不静默回退到 `local`：恢复会话或执行下一个工具调用时会按需重试连接，仅当目标持续不可达时，工具调用才以环境不可用错误失败。通过本端点（或 `/environment` 对话框）可立即重建连接，无需等待下一次工具调用。
-
-| 参数 | 位置 | 类型 | 说明 |
-| --- | --- | --- | --- |
-| `session_id` | path | string | **必填。** 会话 id |
-
-成功时，`data` 为当前绑定 `{ workspace_id, environment_id, cwd? }`。
-
-- `40401`：会话不存在
-- `40420`：不存在该 `environment_id` 的环境
-- `40926`：环境存在但不可用
-
 #### `GET /api/v1/sessions/{session_id}/environments`
 
 列出会话可用的环境。
@@ -892,21 +857,6 @@ main agent 的实时状态汇总；读取它会在会话为冷态时将其恢复
 
 成功时，`data` 为 `{ environments }`。`environments` 每项为 `{ environment_id, type, status, connect_error? }`，其中 `type` 取 `local` / `ssh` / `docker` / `command` 之一，`status` 取 `pending` / `connecting` / `ready` / `disconnected` / `disposed` 之一；`pending` 表示没有可用连接且未观察到失败（尚未连接过），`connect_error` 记录 `disconnected` 条目的失败原因。
 
-- `40401`：会话不存在
-
-#### `POST /api/v1/sessions/{session_id}/environments`
-
-为会话工作区声明一个新环境并即时注册——无需重启。条目深度合并进用户级 `config.toml` 的 `[environments]` 节。
-
-| 参数 | 位置 | 类型 | 说明 |
-| --- | --- | --- | --- |
-| `session_id` | path | string | **必填。** 会话 id |
-| `environment_id` | body | string | **必填。** 新环境的 id |
-| `entry` | body | object | **必填。** 环境条目：`{ type: "ssh", host, remote_bin?, default_cwd? }`、`{ type: "docker", container, context?, remote_bin?, default_cwd? }` 或 `{ command, args?, env?, default_cwd? }` |
-
-成功时，`data` 为 `{ workspace_id, environment_id }`。
-
-- `40001`：条目不合法或 id 已声明
 - `40401`：会话不存在
 
 #### `POST /api/v1/sessions/{session_id}/export`

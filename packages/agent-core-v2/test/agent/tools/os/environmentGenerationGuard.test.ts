@@ -103,6 +103,7 @@ function connectSwappingHarness(readyFs: IHostFileSystem) {
       { status: 'pending', capabilities: [] },
     ),
     {
+      host: undefined,
       connect: async () => {
         calls.push('connect');
         await registration.remove();
@@ -173,7 +174,7 @@ function pngFs(): IHostFileSystem {
 interface ToolCase {
   readonly name: string;
   readonly fs: IHostFileSystem;
-  readonly resolve: (service: IAgentEnvironmentService) => ToolExecution | Promise<ToolExecution>;
+  readonly resolve: (service: IAgentEnvironmentService, path?: string) => ToolExecution | Promise<ToolExecution>;
   readonly expectOutcome: (result: ExecutableToolResult) => void;
 }
 
@@ -187,7 +188,7 @@ function toolCases(): readonly ToolCase[] {
     {
       name: 'Read',
       fs: textFs('visible content'),
-      resolve: (service) =>
+      resolve: (service, path = '/workspace/a.txt') =>
         new ReadTool(
           service,
           workspace,
@@ -197,7 +198,7 @@ function toolCases(): readonly ToolCase[] {
           profile,
           toolPolicy,
           toolRegistry,
-        ).resolveExecution({ path: '/workspace/a.txt' }),
+        ).resolveExecution({ path }),
       expectOutcome: (result) => {
         expect(result.isError).not.toBe(true);
         expect(result.output).toContain('visible content');
@@ -206,8 +207,8 @@ function toolCases(): readonly ToolCase[] {
     {
       name: 'Write',
       fs: writableFs(),
-      resolve: (service) =>
-        new WriteTool(service, workspace).resolveExecution({ path: '/workspace/a.txt', content: 'hello' }),
+      resolve: (service, path = '/workspace/a.txt') =>
+        new WriteTool(service, workspace).resolveExecution({ path, content: 'hello' }),
       expectOutcome: (result) => {
         expect(result.isError).not.toBe(true);
         expect(result.output).toContain('Wrote 5 bytes');
@@ -216,9 +217,9 @@ function toolCases(): readonly ToolCase[] {
     {
       name: 'Edit',
       fs: createFakeHostFs(),
-      resolve: (service) =>
+      resolve: (service, path = '/workspace/a.txt') =>
         new EditTool(editService, service, workspace).resolveExecution({
-          path: '/workspace/a.txt',
+          path,
           old_string: 'foo',
           new_string: 'bar',
         }),
@@ -297,6 +298,20 @@ describe('tool environment generation guard', () => {
       const result = await finish(resolved);
       expect(result.isError).toBe(true);
       expect(result.output).toBe(ENVIRONMENT_CHANGED_OUTPUT);
+    });
+  }
+
+  for (const tool of toolCases().filter(({ name }) => ['Read', 'Write', 'Edit'].includes(name))) {
+    it(`${tool.name} resolves home paths with the reconnected environment host`, async () => {
+      const harness = connectSwappingHarness(tool.fs);
+
+      const execution = await tool.resolve(harness.service, '~/a.txt');
+      if (execution.isError === true) throw new Error('expected a runnable execution');
+      expect(execution.display).toMatchObject({ kind: 'file_io', path: '/home/fake/a.txt' });
+
+      const result = await finish(execution);
+      expect(harness.calls).toEqual(['connect']);
+      tool.expectOutcome(result);
     });
   }
 });

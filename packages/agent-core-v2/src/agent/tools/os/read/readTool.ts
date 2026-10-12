@@ -198,49 +198,54 @@ export class ReadTool implements IReadTool {
     return { workspaceDir: view.workDir, additionalDirs: view.additionalDirs };
   }
 
-  resolveExecution(args: ReadInput): ToolExecution | Promise<ToolExecution> {
+  async resolveExecution(args: ReadInput): Promise<ToolExecution> {
     if (args.column_offset !== undefined && (args.line_offset ?? 1) < 0) {
       return { isError: true, output: 'column_offset is only supported for forward reads. Use a positive line_offset or the forward Next Read arguments.' };
     }
     if (isDaemonFileUrl(args.path)) return this.attachmentExecution(args);
-    const inspected = this.environment.inspect();
-    const expectedGeneration = pinnedGeneration(inspected);
-    const view = new EnvironmentWorkspaceView(inspected, {
-      workDir: this.workspaceCtx.workDir,
-      additionalDirs: [...this.workspaceCtx.additionalDirs, ...this.skillCatalog.catalog.getSkillRoots()],
-    });
-    const env = { _serviceBrand: undefined, ...view.host, ready: Promise.resolve() };
-    const workspace = this.workspaceConfig(view);
-    const path = resolvePathAccessPath(args.path, {
-      env,
-      workspace,
-      operation: 'read',
-    });
-    return {
-      accesses: ToolAccesses.readFile(path),
-      description: `Reading ${args.path}`,
-      display: { kind: 'file_io', operation: 'read', path },
-      approvalRule: literalRulePattern(this.name, path),
-      matchesRule: (ruleArgs) =>
-        matchesPathRuleSubject(ruleArgs, path, {
-          cwd: workspace.workspaceDir,
-          pathClass: env.pathClass,
-          homeDir: env.homeDir,
-        }),
-      execute: async () => {
-        const lease = await acquireOrWhenReady(this.environment, ['fs']);
-        try {
-          if (expectedGeneration !== undefined && lease.environment.identity.generation !== expectedGeneration) {
-            return { isError: true, output: 'Environment changed before execution. Retry the tool call.' };
+    const resolutionLease = await acquireOrWhenReady(this.environment, ['fs']);
+    try {
+      const inspected = resolutionLease.environment;
+      const expectedGeneration = pinnedGeneration(inspected);
+      const view = new EnvironmentWorkspaceView(inspected, {
+        workDir: this.workspaceCtx.workDir,
+        additionalDirs: [...this.workspaceCtx.additionalDirs, ...this.skillCatalog.catalog.getSkillRoots()],
+      });
+      const env = { _serviceBrand: undefined, ...view.host, ready: Promise.resolve() };
+      const workspace = this.workspaceConfig(view);
+      const path = resolvePathAccessPath(args.path, {
+        env,
+        workspace,
+        operation: 'read',
+      });
+      return {
+        accesses: ToolAccesses.readFile(path),
+        description: `Reading ${args.path}`,
+        display: { kind: 'file_io', operation: 'read', path },
+        approvalRule: literalRulePattern(this.name, path),
+        matchesRule: (ruleArgs) =>
+          matchesPathRuleSubject(ruleArgs, path, {
+            cwd: workspace.workspaceDir,
+            pathClass: env.pathClass,
+            homeDir: env.homeDir,
+          }),
+        execute: async () => {
+          const lease = await acquireOrWhenReady(this.environment, ['fs']);
+          try {
+            if (expectedGeneration !== undefined && lease.environment.identity.generation !== expectedGeneration) {
+              return { isError: true, output: 'Environment changed before execution. Retry the tool call.' };
+            }
+            const eventLog = this.resultTruncation.isWireJournalPath(path);
+            const result = await this.execution(environmentFileSource(lease.environment.fs!, path), args, eventLog);
+            return { ...result, spillExempt: true };
+          } finally {
+            lease.dispose();
           }
-          const eventLog = this.resultTruncation.isWireJournalPath(path);
-          const result = await this.execution(environmentFileSource(lease.environment.fs!, path), args, eventLog);
-          return { ...result, spillExempt: true };
-        } finally {
-          lease.dispose();
-        }
-      },
-    };
+        },
+      };
+    } finally {
+      resolutionLease.dispose();
+    }
   }
 
   private async attachmentExecution(args: ReadInput): Promise<ToolExecution> {

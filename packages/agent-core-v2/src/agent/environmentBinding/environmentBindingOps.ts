@@ -11,6 +11,12 @@ const environmentSetBindingSchema = z.object({
   cwd: z.string().optional(),
 });
 
+const runtimeSetBindingSchema = z.object({
+  agentId: z.string(),
+  workspaceId: z.string(),
+  runtimeId: z.string(),
+});
+
 export class EnvironmentSetBinding extends AgentEvent2<z.infer<typeof environmentSetBindingSchema>> {
   static override readonly type = 'environment.set_binding';
   static override readonly durable = true;
@@ -22,8 +28,20 @@ export interface EnvironmentSetBinding {
   readonly cwd?: string;
 }
 
+export class RuntimeSetBinding extends AgentEvent2<z.infer<typeof runtimeSetBindingSchema>> {
+  static override readonly type = 'runtime.set_binding';
+  static override readonly durable = true;
+  static override readonly schema = runtimeSetBindingSchema;
+}
+export interface RuntimeSetBinding {
+  readonly agentId: string;
+  readonly workspaceId: string;
+  readonly runtimeId: string;
+}
+
 export const environmentBindingKey = defineState(
   'environmentBinding',
   (): EnvironmentBinding | undefined => undefined,
 ).replayable({ schema: z.custom<EnvironmentBinding | undefined>() })
-  .on(EnvironmentSetBinding, (_s, e) => ({ environmentId: e.environmentId, cwd: e.cwd }));
+  .on(EnvironmentSetBinding, (_s, e) => ({ environmentId: e.environmentId, cwd: e.cwd }))
+  .on(RuntimeSetBinding, (_s, e) => ({ environmentId: e.runtimeId }));

@@ -37,52 +37,57 @@ export class EditTool implements IEditTool {
     return { workspaceDir: view.workDir, additionalDirs: view.additionalDirs };
   }
 
-  resolveExecution(args: EditInput): ToolExecution {
-    const inspected = this.environment.inspect();
-    const expectedGeneration = pinnedGeneration(inspected);
-    const view = new EnvironmentWorkspaceView(inspected, {
-      workDir: this.workspaceCtx.workDir,
-      additionalDirs: [
-        ...this.workspaceCtx.additionalDirs,
-        ...(this.skillCatalog?.catalog.getSkillRoots() ?? []),
-      ],
-    });
-    const env = view.host;
-    const workspace = this.workspaceConfig(view);
-    const path = resolvePathAccessPath(args.path, {
-      env,
-      workspace,
-      operation: 'write',
-    });
-    return {
-      accesses: ToolAccesses.readWriteFile(path),
-      description: `Editing ${args.path}`,
-      display: {
-        kind: 'file_io',
-        operation: 'edit',
-        path,
-        before: args.old_string,
-        after: args.new_string,
-      },
-      approvalRule: literalRulePattern(this.name, path),
-      matchesRule: (ruleArgs) =>
-        matchesPathRuleSubject(ruleArgs, path, {
-          cwd: workspace.workspaceDir,
-          pathClass: env.pathClass,
-          homeDir: env.homeDir,
-        }),
-      execute: async () => {
-        const lease = await acquireOrWhenReady(this.environment, ['fs']);
-        try {
-          if (expectedGeneration !== undefined && lease.environment.identity.generation !== expectedGeneration) {
-            return { isError: true, output: 'Environment changed before execution. Retry the tool call.' };
+  async resolveExecution(args: EditInput): Promise<ToolExecution> {
+    const resolutionLease = await acquireOrWhenReady(this.environment, ['fs']);
+    try {
+      const inspected = resolutionLease.environment;
+      const expectedGeneration = pinnedGeneration(inspected);
+      const view = new EnvironmentWorkspaceView(inspected, {
+        workDir: this.workspaceCtx.workDir,
+        additionalDirs: [
+          ...this.workspaceCtx.additionalDirs,
+          ...(this.skillCatalog?.catalog.getSkillRoots() ?? []),
+        ],
+      });
+      const env = view.host;
+      const workspace = this.workspaceConfig(view);
+      const path = resolvePathAccessPath(args.path, {
+        env,
+        workspace,
+        operation: 'write',
+      });
+      return {
+        accesses: ToolAccesses.readWriteFile(path),
+        description: `Editing ${args.path}`,
+        display: {
+          kind: 'file_io',
+          operation: 'edit',
+          path,
+          before: args.old_string,
+          after: args.new_string,
+        },
+        approvalRule: literalRulePattern(this.name, path),
+        matchesRule: (ruleArgs) =>
+          matchesPathRuleSubject(ruleArgs, path, {
+            cwd: workspace.workspaceDir,
+            pathClass: env.pathClass,
+            homeDir: env.homeDir,
+          }),
+        execute: async () => {
+          const lease = await acquireOrWhenReady(this.environment, ['fs']);
+          try {
+            if (expectedGeneration !== undefined && lease.environment.identity.generation !== expectedGeneration) {
+              return { isError: true, output: 'Environment changed before execution. Retry the tool call.' };
+            }
+            return await this.execution(args, path, lease.environment.fs!);
+          } finally {
+            lease.dispose();
           }
-          return await this.execution(args, path, lease.environment.fs!);
-        } finally {
-          lease.dispose();
-        }
-      },
-    };
+        },
+      };
+    } finally {
+      resolutionLease.dispose();
+    }
   }
 
   private async execution(

@@ -86,6 +86,18 @@ describe('fs group over a subprocess loopback', () => {
     await expect(fs.readBytes(path, 4, 1000)).resolves.toEqual(new Uint8Array(0));
   });
 
+  it('chunks explicit byte ranges above the per-request limit', async () => {
+    const path = join(workDir, 'chunked-range.bin');
+    const size = 2 * 1024 * 1024 + 17;
+    const data = new Uint8Array(size);
+    for (let i = 0; i < size; i += 1) data[i] = i % 251;
+    await fs.writeBytes(path, data);
+
+    const read = await fs.readBytes(path, size - 3 - 11, 11);
+
+    expect(read).toEqual(data.subarray(11, size - 3));
+  }, 30_000);
+
   it('reads files larger than the whole-file limit in bounded chunks', async () => {
     const path = join(workDir, 'big.bin');
     const size = FS_READ_FILE_WHOLE_MAX_BYTES + 1024 * 1024;

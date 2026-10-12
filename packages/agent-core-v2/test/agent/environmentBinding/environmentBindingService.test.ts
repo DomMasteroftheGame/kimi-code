@@ -3,10 +3,11 @@ import { describe, expect, it, vi } from 'vitest';
 import type { ISessionEventBus } from '#/app/event/eventBus';
 import type { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import '#/agent/contextMemory/conversationTime';
+import { event2FromRecord } from '#/app/event/event2';
 import { IAgentScopeContext, makeAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { AgentEnvironmentService, acquireOrWhenReady, snapshotAgentEnvironmentBinding } from '#/agent/environmentBinding/agentEnvironment';
 import { AgentEnvironmentBindingService, agentEnvironmentBindingKey, ENVIRONMENT_BINDING_REMINDER_VARIANT, PROJECT_CONTEXT_REMINDER_VARIANT } from '#/agent/environmentBinding/environmentBindingService';
-import { environmentBindingKey, EnvironmentSetBinding } from '#/agent/environmentBinding/environmentBindingOps';
+import { environmentBindingKey, EnvironmentSetBinding, RuntimeSetBinding } from '#/agent/environmentBinding/environmentBindingOps';
 import { AgentStateService } from '#/agent/state/agentStateService';
 import { IAgentStateService } from '#/agent/state/agentState';
 import type { IAgentReminderService } from '#/features/reminder/reminderService';
@@ -522,6 +523,20 @@ describe('AgentEnvironmentBindingService', () => {
 });
 
 describe('AgentEnvironmentBindingService restore from wire records', () => {
+  it('restores legacy runtime binding records as environment bindings', () => {
+    const event = event2FromRecord(RuntimeSetBinding, {
+      type: 'runtime.set_binding',
+      time: 1,
+      agentId: 'main',
+      workspaceId: 'workspace',
+      runtimeId: 'remote',
+    });
+    expect(event).toBeInstanceOf(RuntimeSetBinding);
+    const fold = environmentBindingKey.replayable.folds.get(RuntimeSetBinding);
+    expect(fold).toBeDefined();
+    expect(fold!(undefined, event!, {} as never)).toEqual({ environmentId: 'remote' });
+  });
+
   it('does not reseed a remote binding from raw wire records that replay excluded', async () => {
     const { binding, restoreHooks, dispatched, reminders } = setup({ agentId: 'agent-1' });
 

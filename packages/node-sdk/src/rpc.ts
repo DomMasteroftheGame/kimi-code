@@ -25,6 +25,7 @@ import type {
   AddAdditionalDirResult,
   AgentCommandInfo,
   AgentEnvironmentBinding,
+  AgentRuntimeBinding,
   AppMcpServerInspection,
   BackgroundTaskInfo,
   ConfigDiagnostics,
@@ -151,6 +152,10 @@ export interface ActivatePluginCommandRpcInput extends SessionIdRpcInput {
 export interface RunCommandRpcInput extends SessionIdRpcInput {
   readonly name: string;
   readonly args?: string | undefined;
+}
+
+export interface SwitchSessionRuntimeRpcInput extends SessionIdRpcInput {
+  readonly runtimeId: string;
 }
 
 export interface ReconnectMcpServerRpcInput extends SessionIdRpcInput {
@@ -463,6 +468,10 @@ export abstract class SDKRpcClientBase {
   abstract listCommands(input: SessionIdRpcInput): Promise<readonly AgentCommandInfo[]>;
 
   abstract runCommand(input: RunCommandRpcInput): Promise<void>;
+
+  abstract getRuntime(input: SessionIdRpcInput): Promise<AgentRuntimeBinding>;
+
+  abstract switchRuntime(input: SwitchSessionRuntimeRpcInput): Promise<AgentRuntimeBinding>;
 
   abstract getEnvironment(input: SessionIdRpcInput): Promise<AgentEnvironmentBinding>;
 

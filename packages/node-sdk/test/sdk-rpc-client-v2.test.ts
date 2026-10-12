@@ -197,6 +197,28 @@ describe('SDKRpcClientV2 (agent-core-v2 wiring)', () => {
     }
   });
 
+  it('keeps legacy runtime methods on the same binding', async () => {
+    const { harness, client } = await makeEnvironmentHarness();
+    const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-work-'));
+    tempDirs.push(workDir);
+    const provider = await attachFakeBoxEnvironment(client);
+    try {
+      const session = await harness.createSession({ workDir });
+      const initial = await session.getRuntime();
+      expect(initial.runtimeId).toBe('local');
+      expect(initial.workspaceId).not.toBe('');
+
+      const switched = await session.switchRuntime('fake-box');
+      expect(switched).toEqual({ workspaceId: initial.workspaceId, runtimeId: 'fake-box' });
+      expect(await session.getRuntime()).toEqual(switched);
+      expect(await session.getEnvironment()).toMatchObject({ environmentId: 'fake-box' });
+    } finally {
+      await provider.dispose();
+      await harness.close();
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('rejects environment options that name an undeclared environment', async () => {
     vi.stubEnv('KIMI_CODE_EXPERIMENTAL_FLAG', 'false');
     const { harness } = await makeHarness();

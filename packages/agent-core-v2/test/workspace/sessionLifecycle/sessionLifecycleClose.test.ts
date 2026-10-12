@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { ISessionScopeHandle } from '#/_base/di/scope';
 import { EnvironmentRegistry } from '#/environment/environmentRegistry';
@@ -98,5 +98,61 @@ describe('SessionLifecycleService environment cleanup', () => {
 
     expect(killed).toEqual([]);
     lease.dispose();
+  });
+});
+
+function createMaterializeHarness() {
+  const stop = new Error('stop');
+  const mergeAdditionalDirs = vi.fn(async () => {
+    throw stop;
+  });
+  const workspaceDirs = {
+    ready: Promise.resolve(),
+    mergeAdditionalDirs,
+    sessionInfo: () => ({}),
+  };
+  const args = [
+    undefined,
+    { workspaceId: 'workspace', persistenceScope: 'sessions/workspace' },
+    { homeDir: '/tmp' },
+    { ready: Promise.resolve(), get: () => false },
+    undefined,
+    undefined,
+    { append: () => {}, flush: async () => {} },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    { publish: () => {} },
+    { withContext: () => ({ track2: () => {} }) },
+    { exposedIds: () => [] },
+    { ready: Promise.resolve() },
+    { ready: Promise.resolve() },
+    { ready: Promise.resolve() },
+    { ready: Promise.resolve() },
+    { ready: Promise.resolve() },
+    workspaceDirs,
+    { reloadSources: async () => {}, sessionData: () => ({}) },
+    { sessionProvider: () => ({}) },
+    { sessionHandle: () => ({}) },
+    { ready: Promise.resolve() },
+    { ready: Promise.resolve() },
+    new EnvironmentRegistry(),
+  ];
+  const service = Reflect.construct(SessionLifecycleService, args) as SessionLifecycleService;
+  return { service, mergeAdditionalDirs, stop };
+}
+
+describe('SessionLifecycleService environment-aware directories', () => {
+  it('resolves additional directories from the bound environment cwd', async () => {
+    const { service, mergeAdditionalDirs, stop } = createMaterializeHarness();
+    await expect(service.create({
+      workDir: '/workspace',
+      environmentId: 'remote',
+      environmentCwd: '/remote/work',
+      additionalDirs: ['../shared'],
+    })).rejects.toBe(stop);
+
+    expect(mergeAdditionalDirs).toHaveBeenCalledWith('/remote/work', ['../shared']);
   });
 });

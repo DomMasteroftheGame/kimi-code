@@ -152,7 +152,7 @@ export class SessionSubagentService extends Service implements ISessionSubagentS
     const callerBinding = caller.accessor.get(IAgentEnvironmentBindingService).current;
     const lease = plan.fork
       ? undefined
-      : caller.accessor.get(IAgentEnvironmentService).acquire(['process']);
+      : await caller.accessor.get(IAgentEnvironmentService).acquireWhenReady(['process']);
     try {
       let created: IAgentScopeHandle;
       try {
