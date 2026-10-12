@@ -5,7 +5,7 @@ import { join } from 'pathe';
 import type { IInstantiationService } from '#/_base/di/instantiation';
 import { Disposable, type IDisposable } from '#/_base/di/lifecycle';
 import { LOCAL_ENVIRONMENT_ID } from '#/environment/environment';
-import type { IEnvironmentService } from '#/app/environment/environment';
+import { IEnvironmentService } from '#/app/environment/environment';
 import {
   createScopedChildHandle,
   type ISessionScopeHandle,
@@ -191,7 +191,7 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
     @IWorkspaceMcpService private readonly workspaceMcp: IWorkspaceMcpService,
     @IModelService private readonly models: IModelService,
     @IProviderService private readonly providers: IProviderService,
-    private readonly environments: Pick<IEnvironmentService, 'drainSession'>,
+    private readonly environments: IEnvironmentService,
     onDispose?: () => void,
     private readonly profileContextKey?: string,
   ) {
@@ -214,6 +214,12 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
       .catch(() => undefined);
     const handle = await this.materializeSession({ ...opts, sessionId });
     try {
+      if (opts.environmentProject === true) {
+        await handle.accessor.get(ISessionMetadata).update({
+          environmentId: opts.environmentId, environmentCwd: opts.environmentCwd,
+          environmentProject: opts.environmentProject,
+        }, { touchUpdatedAt: false });
+      }
       const agents = handle.accessor.get(IAgentLifecycleService);
       const main =
         opts.mainAgentBinding !== undefined
@@ -287,6 +293,7 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
           seeds: [
             ...sessionContextSeed(ctx),
             [ITelemetryService, telemetryBinding.telemetry],
+            [IEnvironmentService, this.environments],
             ...sessionAgentProfileCatalogSeed({
               _serviceBrand: undefined,
               workspaceKey: workspaceId,
@@ -671,6 +678,7 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
         agents,
         environmentId: sourceMeta?.environmentId,
         environmentCwd: sourceMeta?.environmentCwd,
+        environmentProject: sourceMeta?.environmentProject,
         custom: forkCustomMetadata(sourceMeta?.custom, opts.metadata),
         lastPrompt: turnSlice === undefined ? sourceMeta?.lastPrompt : turnSlice.lastPrompt,
         lastTurnReason: sourceMeta?.lastTurnReason,

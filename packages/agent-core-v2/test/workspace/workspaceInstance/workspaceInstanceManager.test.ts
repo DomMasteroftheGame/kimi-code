@@ -63,6 +63,7 @@ function manager(
   ];
   args[19] = { entries: () => [] };
   args[28] = environments;
+  args[29] = { assertAllowed: () => {} };
   customize?.(args);
   return Reflect.construct(WorkspaceInstanceManager, args) as WorkspaceInstanceManager;
 }

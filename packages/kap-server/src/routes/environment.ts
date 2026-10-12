@@ -82,9 +82,11 @@ export function registerEnvironmentRoutes(app: EnvironmentRouteHost, core: Scope
         if (session === undefined) {
           throw new Error2(ErrorCodes.SESSION_NOT_FOUND, `session ${req.params.session_id} does not exist`);
         }
-        const declarations = await resolveDeclarations(core);
+        const workspaceId = session.accessor.get(ISessionContext).workspaceId;
+        const declarationService = core.accessor.get(IEnvironmentDeclarationService);
+        const declarations = await resolveDeclarations(core, workspaceId);
         const payload: SessionEnvironmentsResponse = {
-          environments: core.accessor.get(IEnvironmentService).snapshot().environments.map((environment) =>
+          environments: core.accessor.get(IEnvironmentService).snapshot().environments.filter((environment) => declarationService.isVisible(workspaceId, environment.environmentId)).map((environment) =>
             toEntry(environment, declarations.get(environment.environmentId)),
           ),
         };
@@ -107,8 +109,9 @@ async function resolveEnvironmentAgent(core: Scope, sessionId: string): Promise<
 
 async function resolveDeclarations(
   core: Scope,
+  workspaceId: string,
 ): Promise<ReadonlyMap<string, RemoteEnvironmentEntry>> {
-  const declarations = await core.accessor.get(IEnvironmentDeclarationService).declarations();
+  const declarations = await core.accessor.get(IEnvironmentDeclarationService).declarations(workspaceId);
   return new Map((declarations?.entries ?? []).map((declaration) => [declaration.id, declaration.entry]));
 }
 

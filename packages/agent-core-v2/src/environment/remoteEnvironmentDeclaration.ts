@@ -91,16 +91,20 @@ export type EnvironmentsSection = z.infer<typeof EnvironmentsSectionSchema>;
 export interface RemoteEnvironmentDeclaration {
   readonly id: string;
   readonly entry: RemoteEnvironmentEntry;
+  readonly source?: 'project';
 }
 
 export interface EnvironmentDeclarationDefault {
   readonly environmentId: string;
   readonly cwd: string;
+  readonly source?: 'project';
 }
 
 export interface EnvironmentDeclarationSet {
   readonly entries: readonly RemoteEnvironmentDeclaration[];
   readonly default?: EnvironmentDeclarationDefault;
+  readonly projectError?: Error;
+  readonly trustRequired?: boolean;
 }
 
 export function sectionEntries(

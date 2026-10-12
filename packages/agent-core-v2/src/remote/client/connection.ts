@@ -33,6 +33,7 @@ export interface ConnectOptions {
 
 export interface ConnectionCloseInfo {
   readonly reason: string;
+  readonly kind?: 'eof' | 'pipe_error' | 'protocol_error' | 'client_closed' | 'other';
 }
 
 export class ConnectionClosedError extends Error {
@@ -138,7 +139,7 @@ export class RemoteExecConnection {
         this.onPipeEnd();
       });
       this.pipe.onError((error) => {
-        this.fail(new ConnectionClosedError(`pipe error: ${error.message}`));
+        this.fail(new ConnectionClosedError(`pipe error: ${error.message}`), 'pipe_error');
       });
 
       this.onHandshakeResponse = (error) => {
@@ -301,7 +302,7 @@ export class RemoteExecConnection {
   }
 
   close(): void {
-    this.fail(new ConnectionClosedError('connection closed by client'));
+    this.fail(new ConnectionClosedError('connection closed by client'), 'client_closed');
   }
 
   private onData(chunk: Uint8Array): void {
@@ -376,13 +377,13 @@ export class RemoteExecConnection {
   }
 
   private onPipeEnd(): void {
-    this.fail(new ConnectionClosedError('pipe ended'));
+    this.fail(new ConnectionClosedError('pipe ended'), 'eof');
   }
 
-  private fail(error: Error): void {
+  private fail(error: Error, kind: ConnectionCloseInfo['kind'] = error instanceof ProtocolViolationError ? 'protocol_error' : 'other'): void {
     if (this.state === 'closed') return;
     this.state = 'closed';
-    this.closeInfo = { reason: error.message };
+    this.closeInfo = { reason: error.message, kind };
     if (this.handshakeTimer !== undefined) {
       clearTimeout(this.handshakeTimer);
       this.handshakeTimer = undefined;

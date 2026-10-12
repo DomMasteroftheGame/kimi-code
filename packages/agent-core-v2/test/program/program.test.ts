@@ -16,7 +16,9 @@ import { HostFileSystem } from '#/os/backends/node-local/hostFsService';
 import { HostProcessService } from '#/os/backends/node-local/hostProcessService';
 import { HostFsError, OsFsErrors } from '#/os/interface/hostFsErrors';
 import type { IHostFileSystem } from '#/os/interface/hostFileSystem';
+import type { IEnvironmentService } from '#/app/environment/environment';
 import { Program } from '#/program/program';
+import { EnvironmentDeclarationService } from '#/app/environmentDeclaration/environmentDeclarationService';
 import type { ProgramSessionControllerInput } from '#/program/programDependencies';
 import { environmentBindingId } from '#/environment/environment';
 import { FakeEnvironment } from '#/environment/fakeEnvironment';
@@ -67,14 +69,19 @@ function programWorkspace(cwd: string): IWorkspaceContext {
 }
 
 function setup(readiness = new Map<string, Promise<void>>(), order: string[] = []) {
-  const registry = new EnvironmentRegistry();
+  const registry = Object.assign(new EnvironmentRegistry(), {
+    _serviceBrand: undefined,
+    ready: Promise.resolve(),
+    addProvider: vi.fn(async () => ({ dispose: async () => {} })),
+  });
   const controllerInputs: ProgramSessionControllerInput[] = [];
   const program = new Program(
     'workspace',
-    registry,
+    registry as unknown as IEnvironmentService,
     programWorkspace('/workspace'),
     {
       agentProfiles: { entries: () => [] },
+      environmentDeclarations: { assertAllowed: () => {}, whenReady: async () => {} },
       createSessionController: (input: ProgramSessionControllerInput) => {
         controllerInputs.push(input);
         return { dispose: input.onDispose } as never;
@@ -123,6 +130,28 @@ function setup(readiness = new Map<string, Promise<void>>(), order: string[] = [
 }
 
 describe('Program', () => {
+  it('seeds a complete environment service facade without bypassing resolver authorization', async () => {
+    const { registry, program, controllerInputs } = setup();
+    registry.register(fakeEnvironment('local', 'one'));
+    program.createSessionController();
+    const facade = controllerInputs[0]!.environments;
+    await facade.ready;
+    expect(facade.snapshot()).toEqual(registry.snapshot());
+    expect(facade.current('local')).toBe(registry.current('local'));
+    facade.inspect({ environmentId: 'local' });
+    facade.acquire({ environmentId: 'local' }).dispose();
+    (await facade.acquireWhenReady({ environmentId: 'local' })).dispose();
+    const registration = facade.register(new FakeEnvironment({ environmentId: 'dynamic', generation: 'one' }));
+    expect(registry.current('dynamic')).toBeDefined();
+    const factory = { id: 'example', attach: async () => ({ dispose() {} }) };
+    await facade.addProvider(factory);
+    expect(registry.addProvider).toHaveBeenCalledWith(factory);
+    await facade.drainSession('example');
+    await registration.remove();
+    program.dispose();
+    await registry.dispose();
+  });
+
   it('acquires only available local generations and recovers after reconnect', async () => {
     const { registry, program, create } = setup();
     const current = fakeEnvironment('local', 'one', { status: 'disconnected' });
@@ -521,12 +550,13 @@ async function localityFixture(options: { readonly remoteCwd?: string } = {}): P
   );
   const program = new Program(
     'workspace',
-    registry,
+    registry as unknown as IEnvironmentService,
     programWorkspace(localRoot),
     {
       appState: undefined,
       bootstrap,
       config,
+      environmentDeclarations: new EnvironmentDeclarationService(config as never, noopLogger, registry),
       git: { current: localGit, onDidChange: Event.None },
       identity: {
         _serviceBrand: undefined,

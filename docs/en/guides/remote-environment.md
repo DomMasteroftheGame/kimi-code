@@ -23,7 +23,7 @@ Only POSIX targets are supported; Windows targets are not.
 
 ## Declaring environments
 
-Environments are declared in the `[environments]` section of `config.toml` (user level). Three kinds of entries are available: SSH hosts, Docker-compatible containers, and custom launcher commands for anything else (OrbStack machines, `kubectl exec`, Apple Container, managed sandboxes, and so on).
+Environments are declared in the `[environments]` section of `config.toml` (user level), or in `.kimi-code/environments.toml` under the local workspace root (project level). Three kinds of entries are available: SSH hosts, Docker-compatible containers, and custom launcher commands for anything else (OrbStack machines, `kubectl exec`, Apple Container, managed sandboxes, and so on).
 
 ```toml
 [environments]
@@ -51,11 +51,28 @@ defaultCwd = "/home/me/kimi-code"
 Key rules:
 
 - `type` and `command` are mutually exclusive within one entry: `type = "ssh"` and `type = "docker"` are built-in launchers, while `command` + `args` is the generic form (same shape as stdio entries in `.mcp.json`). `env` sets the launcher process's environment on your machine; it is **not** propagated into commands the agent runs on the target.
-- `defaultCwd` is used when a session is created on the environment unless `--environment-cwd` overrides it. It is not validated locally and no path mapping is applied — it must be a valid directory on the target.
-- The optional top-level `default` names the environment a session binds to when creation does not specify one — a cold start, print mode, or an API create. The entry it points at must set `defaultCwd`. Without a `default`, those sessions start on the `local` environment. In the TUI, `/new` instead keeps the current session's environment and working directory. If no session exists yet, `/new` uses `--environment` when the process was started with it, otherwise this default.
+- `defaultCwd` is used when a session is created on the environment unless `--environment-cwd` overrides it. It must be an absolute POSIX path on the target; relative paths and `~` are not expanded against your machine or the target's home. Repeated separators, `.` and `..` are normalized before checking that directory on the target, and the normalized path is saved in the binding. Symlink names are preserved, not rewritten with realpath; `symlink/..` therefore uses the lexical parent, not the symlink target's physical parent.
+- The optional top-level `default` names the environment a session binds to when creation does not specify one — a cold start, print mode, or an API create. The entry it points at must set `defaultCwd`. Without a project or user `default`, those sessions start on the `local` environment. In the TUI, `/new` instead keeps the current session's environment and working directory. If no session exists yet, `/new` uses `--environment` when the process was started with it, otherwise the resolved default.
 - The environment id is the entry's key: at most 64 characters, no leading or trailing whitespace; `local` and `default` are reserved words.
 
-With file watching enabled, declaration edits are applied without a restart. Removing an environment does not silently rebind a session to `local`; subsequent tool calls fail with `environment.not_found`.
+With file watching enabled, declaration edits are applied without a restart. Removing an environment does not silently rebind a session to `local`; subsequent tool calls fail with `environment.not_found` or `environment.unavailable`.
+
+The project file contains the environment section directly, without an `[environments]` wrapper:
+
+```toml
+default = "project-box"
+
+[project-box]
+type = "ssh"
+host = "dev.example.test"
+defaultCwd = "/work/project"
+```
+
+Project declarations are read from your local workspace, never from the remote execution directory. Trusting that workspace enables them; the trust prompt previews the launcher, configuration origin, and target working directory without connecting. Launcher environment variable values are not shown. Project trust does not allow relative executables or executables resolved from the current directory.
+
+An explicit environment selection wins over a trusted project default, which wins over the user default. Without either default, sessions start on `local`. A project without a default does not change the user's default working directory. Noninteractive creation with an untrusted project default fails with a trust-required error; trust the workspace first, or explicitly select an independently available environment, including `--environment local`.
+
+Environment IDs remain process-wide. Equal IDs may share a connection only when their launcher settings match; their working directories can differ. Different launchers with the same ID produce a configuration conflict instead of replacing another workspace's target. Project-only declarations are available only to their trusted workspace. Resuming a project-origin session requires that its project declaration still exists and remains trusted, even if an identical user-level launcher is also configured.
 
 For the full field reference, see [`environments`](../configuration/config-files.md#environments).
 

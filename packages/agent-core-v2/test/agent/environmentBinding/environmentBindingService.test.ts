@@ -179,6 +179,7 @@ function setup(options: {
   } as unknown as ISessionMetadata;
   const environmentDeclarations = {
     _serviceBrand: undefined,
+    isDeclared: (id: string) => id === 'remote',
     declarations: async () => ({ entries: [{ id: 'remote' }] }),
   } as unknown as IEnvironmentDeclarationService;
   const workDirWrites: string[] = [];
@@ -283,6 +284,28 @@ describe('AgentEnvironmentBindingService', () => {
     await flushProbe();
 
     expect(metadataUpdates).toEqual([]);
+  });
+
+  it.each(['C:\\repo\\src', '\\\\server\\share\\repo'])('restores native Windows ACP cwd %s without POSIX normalization', async (cwd) => {
+    const restored = setup({ seedBinding: { environmentId: 'acp:example', cwd } });
+    restored.registry.register(environment('acp:example', 'acp-one', 'ready', ['process'], { ...LOCAL_HOST, pathClass: 'win32' }));
+    restored.state.set(environmentBindingKey, { environmentId: 'acp:example', cwd });
+    await restored.restoreHooks.get('agent-environment-binding')?.(undefined, async () => {});
+    expect(restored.binding.current).toEqual({ environmentId: 'acp:example', cwd });
+    expect(restored.workDirWrites).toEqual([cwd]);
+    expect(restored.metadataUpdates).toEqual([]);
+    restored.agentEnvironment.acquire().dispose();
+    await restored.registry.dispose();
+  });
+
+  it('normalizes restored executor cwd before applying and persisting it', async () => {
+    const restored = setup();
+    restored.state.set(environmentBindingKey, { environmentId: 'remote', cwd: '/remote//repo/./sub/..' });
+    await restored.restoreHooks.get('agent-environment-binding')?.(undefined, async () => {});
+    expect(restored.binding.current.cwd).toBe('/remote/repo');
+    expect(restored.workDirWrites).toEqual(['/remote/repo']);
+    expect(restored.metadataUpdates).toEqual([{ environmentId: 'remote', environmentCwd: '/remote/repo' }]);
+    await restored.registry.dispose();
   });
 
   it('switches only after the target can be acquired and emits the committed binding', () => {

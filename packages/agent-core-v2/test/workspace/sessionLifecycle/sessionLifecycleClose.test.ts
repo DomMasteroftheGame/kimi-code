@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import type { IEnvironmentService } from '#/app/environment/environment';
 import type { ISessionScopeHandle } from '#/_base/di/scope';
 import { EnvironmentRegistry } from '#/environment/environmentRegistry';
 import { SessionLifecycleService } from '#/workspace/sessionLifecycle/sessionLifecycleService';
@@ -33,7 +34,7 @@ function closeHarness(environments: EnvironmentRegistry): SessionLifecycleServic
     undefined as never,
     undefined as never,
     undefined as never,
-    environments,
+    environments as unknown as IEnvironmentService,
   );
 }
 

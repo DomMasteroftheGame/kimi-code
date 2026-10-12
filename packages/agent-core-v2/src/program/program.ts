@@ -137,25 +137,50 @@ export class Program {
   private readonly failedGenerations = new Set<string>();
   private readonly reconciledGenerations = new Map<string, { readonly environmentId: string; readonly cwd?: string }>();
   private shared: ProgramShared | undefined;
+  private environmentSource?: { dispose(): void };
   private disposed = false;
   private resolveReady?: () => void;
   readonly ready = new Promise<void>((resolve) => { this.resolveReady = resolve; });
 
   constructor(
     readonly workspaceId: string,
-    private readonly environments: Pick<IEnvironmentService, 'inspect' | 'acquire' | 'acquireWhenReady' | 'onDidChange' | 'current' | 'snapshot' | 'drainSession'>,
+    private readonly environments: IEnvironmentService,
     private readonly context: IWorkspaceContext,
     private readonly dependencies: ProgramDependencies,
   ) {
     this.binding = Object.freeze({ environmentId: LOCAL_ENVIRONMENT_ID });
-    this.resolver = {
-      _serviceBrand: undefined,
-      inspect: (binding) => this.environments.inspect(binding),
-      acquire: (binding, required) => this.environments.acquire(binding, required),
-      acquireWhenReady: (binding, required) => this.environments.acquireWhenReady(binding, required),
-    };
+    this.resolver = this.environmentResolver();
     this.registrySubscription = environments.onDidChange((change) => this.onEnvironmentChange(change));
     this.reconcileGeneration(LOCAL_ENVIRONMENT_ID);
+  }
+
+  private environmentResolver(projectEnvironmentId?: string): EnvironmentResolver {
+    const authorize = (binding: EnvironmentBinding): void => {
+      this.dependencies.environmentDeclarations.assertAllowed(this.workspaceId, binding.environmentId, binding.environmentId === projectEnvironmentId);
+    };
+    return {
+      _serviceBrand: undefined,
+      inspect: (binding) => {
+        authorize(binding);
+        return this.environments.inspect(binding);
+      },
+      acquire: (binding, required) => {
+        authorize(binding);
+        return this.environments.acquire(binding, required);
+      },
+      acquireWhenReady: async (binding, required) => {
+        await this.dependencies.environmentDeclarations.whenReady(this.workspaceId);
+        authorize(binding);
+        const lease = await this.environments.acquireWhenReady(binding, required);
+        try {
+          authorize(binding);
+          return lease;
+        } catch (error) {
+          lease.dispose();
+          throw error;
+        }
+      },
+    };
   }
 
   get status(): ProgramStatus { return this.currentStatus; }
@@ -175,7 +200,8 @@ export class Program {
     return this.requireGeneration(environmentId, cwd).id;
   }
 
-  createSessionController(environmentId: string = LOCAL_ENVIRONMENT_ID, cwd?: string): SessionLifecycleService {
+  createSessionController(environmentId: string = LOCAL_ENVIRONMENT_ID, cwd?: string, project = false): SessionLifecycleService {
+    this.dependencies.environmentDeclarations.assertAllowed(this.workspaceId, environmentId, project);
     const generation = this.requireGeneration(environmentId, cwd);
     this.resolver.acquire({ environmentId }, PROGRAM_CAPABILITIES).dispose();
     generation.references += 1;
@@ -186,10 +212,19 @@ export class Program {
       this.releaseGeneration(generation);
     };
     try {
+      const resolver = project ? this.environmentResolver(environmentId) : this.resolver;
       return this.dependencies.createSessionController({
         context: this.context,
         profileContextKey: generation.profileContextKey,
-        environments: this.environments,
+        environments: {
+          ...resolver, ready: this.environments.ready,
+          register: (environment) => this.environments.register(environment),
+          addProvider: (factory) => this.environments.addProvider(factory),
+          snapshot: () => this.environments.snapshot(),
+          onDidChange: this.environments.onDidChange,
+          current: (id) => this.environments.current(id),
+          drainSession: (id) => this.environments.drainSession(id),
+        },
         workspaceAgentProfiles: generation.agentProfiles,
         extraAgentProfiles: generation.extraAgentProfiles,
         explicitAgentProfiles: generation.explicitAgentProfiles,
@@ -256,6 +291,7 @@ export class Program {
     if (this.disposed) return;
     this.disposed = true;
     this.registrySubscription.dispose();
+    this.environmentSource?.dispose();
     const generations = [...this.generations.values()];
     this.generations.clear();
     for (const generation of generations) this.retireGeneration(generation);
@@ -364,7 +400,7 @@ export class Program {
       const userSkills = this.dependencies.userSkills;
       const workspaceSkills = own(new WorkspaceRootSkillSource(targetSkillDiscovery, context, this.dependencies.config, this.dependencies.bootstrap, targetFs, environmentId === LOCAL_ENVIRONMENT_ID));
       const skills = own(new WorkspaceSkillCatalogService(this.dependencies.builtinSkills, userSkills, explicitSkills, extraSkills, workspaceSkills, pluginSkills, state));
-      const trustDisclosure = new WorkspaceTrustDisclosureService(context, targetFs, this.dependencies.bootstrap, this.dependencies.config, localConfig, trust, skills, agentProfiles, this.dependencies.agentProfiles, instructions, this.dependencies.log);
+      const trustDisclosure = new WorkspaceTrustDisclosureService(context, targetFs, this.dependencies.bootstrap, this.dependencies.config, localConfig, trust, skills, agentProfiles, this.dependencies.agentProfiles, instructions, this.dependencies.log, { root: this.context.cwd, fs: localFs });
       return {
         id: environment.identity.generation,
         profileContextKey,
@@ -407,6 +443,7 @@ export class Program {
       const fs = local.fs!;
       const state = own(new WorkspaceStateService(this.dependencies.appState));
       const trust = own(new WorkspaceTrustService(this.context, this.dependencies.docs, state, this.dependencies.telemetry, this.dependencies.bootstrap));
+      this.environmentSource = own(this.dependencies.environmentDeclarations.attachWorkspace(this.context, fs, trust));
       const mcpConfig = own(new WorkspaceMcpConfigService(this.context, this.dependencies.bootstrap, this.dependencies.plugins, this.dependencies.log, this.dependencies.config, fs, trust, this.dependencies.configStore));
       const mcp = own(new WorkspaceMcpService(this.context, this.resolver, mcpConfig, this.dependencies.oauth, this.dependencies.log, this.dependencies.telemetry, this.dependencies.identity, this.dependencies.sessionManager));
       const userAgentProfiles = own(new UserAgentProfileLoaderService(this.dependencies.bootstrap, fs, this.dependencies.log, this.dependencies.builtinAgentProfiles, this.context, this.dependencies.agentProfiles));

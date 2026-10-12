@@ -170,6 +170,26 @@ describe('server-v2 /api/v1 environment routes', () => {
       expect(byId.get('loop')?.connect_error).toBeUndefined();
     });
 
+    it('lists project-only environments only in the trusted originating workspace', async () => {
+      const rootA = join(home!, 'project-a');
+      const rootB = join(home!, 'project-b');
+      await mkdir(join(rootA, '.kimi-code'), { recursive: true });
+      await mkdir(rootB);
+      await writeFile(join(rootA, '.kimi-code', 'environments.toml'), '[project-box]\ncommand = "example-launcher"\ndefaultCwd = "/remote/project"');
+      const workspace = await server!.core.accessor.get(IWorkspaceInstanceManager).getOrCreate({ root: rootA });
+      await workspace.program.trust.trust();
+      const a = await call<SessionWire>('POST', '/api/v1/sessions', { metadata: { cwd: rootA } });
+      const b = await call<SessionWire>('POST', '/api/v1/sessions', { metadata: { cwd: rootB } });
+      expect(a.body.code).toBe(0);
+      expect(b.body.code).toBe(0);
+      const listA = await call<EnvironmentsWire>('GET', `/api/v1/sessions/${a.body.data.id}/environments`);
+      const listB = await call<EnvironmentsWire>('GET', `/api/v1/sessions/${b.body.data.id}/environments`);
+      expect(listA.body.data.environments).toContainEqual(expect.objectContaining({ environment_id: 'project-box', status: 'pending' }));
+      expect(listB.body.data.environments.some((entry) => entry.environment_id === 'project-box')).toBe(false);
+      const denied = await call<SessionWire>('POST', '/api/v1/sessions', { metadata: { cwd: rootB }, environment_id: 'project-box', environment_cwd: '/remote/project' });
+      expect(denied.body.code).not.toBe(0);
+    });
+
     it('keeps legacy runtime routes on the same binding', async () => {
       const id = await createSession();
       const initial = await call<{ workspace_id: string; runtime_id: string }>(

@@ -23,7 +23,7 @@ Kimi Code 把 Agent 循环、模型请求、凭据、审批和会话状态全部
 
 ## 声明环境
 
-环境声明在 `config.toml` 的 `[environments]` 节（user 级）。共有三类条目：SSH 主机、Docker 兼容容器，以及用于其他环境的自定义启动命令（OrbStack 机器、`kubectl exec`、Apple Container、受管沙箱等）。
+环境声明在用户级 `config.toml` 的 `[environments]` 节，或本机工作区根目录下的项目级 `.kimi-code/environments.toml` 中。共有三类条目：SSH 主机、Docker 兼容容器，以及用于其他环境的自定义启动命令（OrbStack 机器、`kubectl exec`、Apple Container、受管沙箱等）。
 
 ```toml
 [environments]
@@ -51,11 +51,28 @@ defaultCwd = "/home/me/kimi-code"
 关键规则：
 
 - `type` 与 `command` 在同一条目内互斥：`type = "ssh"` 和 `type = "docker"` 是内置启动器，`command` + `args` 是通用形式（与 `.mcp.json` 的 stdio 条目形态一致）。`env` 设置的是本机启动器进程的环境，**不会**传播到 Agent 在目标环境执行的命令里。
-- `defaultCwd` 是在该环境上创建会话时使用的工作目录，可被 `--environment-cwd` 覆盖。它不在本机校验，也不做任何路径映射——必须是目标环境上的有效目录。
-- 可选的顶层 `default` 指定创建会话时未显式给出绑定时使用的环境——冷启动、print 模式，或 API 创建。它指向的条目必须设置 `defaultCwd`。未设置 `default` 时，这些会话从 `local` 开始。TUI 里的 `/new` 不属于这种情况：它保留当前会话的环境和工作目录。还没有会话时，`/new` 使用进程启动时的 `--environment`；没有该参数时才用这个 default。
+- `defaultCwd` 是在该环境上创建会话时使用的工作目录，可被 `--environment-cwd` 覆盖。它必须是目标环境上的 POSIX 绝对路径；相对路径和 `~` 不会按本机目录或目标机器的 home 展开。系统先规范化重复分隔符、`.` 和 `..`，再在目标环境上校验目录，并保存同一个规范化路径。符号链接名称会保留，不会用 realpath 改写；因此 `symlink/..` 使用路径拼写中的父目录，而不是符号链接目标的物理父目录。
+- 可选的顶层 `default` 指定创建会话时未显式给出绑定时使用的环境——冷启动、print 模式，或 API 创建。它指向的条目必须设置 `defaultCwd`。项目和用户都未设置 `default` 时，这些会话从 `local` 开始。TUI 里的 `/new` 不属于这种情况：它保留当前会话的环境和工作目录。还没有会话时，`/new` 使用进程启动时的 `--environment`；没有该参数时才用解析后的 default。
 - 环境 id 即条目的键名：不超过 64 个字符，首尾不能有空白；`local` 和 `default` 是保留字。
 
-启用[文件监听](../configuration/config-files.md#watch)后，声明文件的修改无需重启即可生效。删除环境不会把会话静默改绑到 `local`；后续工具调用会以 `environment.not_found` 失败。
+启用[文件监听](../configuration/config-files.md#watch)后，声明文件的修改无需重启即可生效。删除环境不会把会话静默改绑到 `local`；后续工具调用会以 `environment.not_found` 或 `environment.unavailable` 失败。
+
+项目文件直接包含环境配置，不需要 `[environments]` 外层：
+
+```toml
+default = "project-box"
+
+[project-box]
+type = "ssh"
+host = "dev.example.test"
+defaultCwd = "/work/project"
+```
+
+项目声明从本机工作区读取，绝不会从远端执行目录读取。信任该工作区后，声明才会启用；信任提示会预览启动器、配置来源和目标工作目录，但不会连接环境，也不会显示启动器环境变量的值。信任项目不会放宽启动器限制：相对可执行路径和从当前目录解析出的可执行程序仍不能使用。
+
+显式环境选择优先于已信任的项目 default，项目 default 优先于用户 default。两者都没有 default 时，会话从 `local` 开始。项目没有 default 时，不会改变用户 default 的工作目录。非交互创建遇到未信任的项目 default 会明确要求信任；可以先信任工作区，或显式选择独立可用的环境，包括 `--environment local`。
+
+环境 ID 仍是进程级的。相同 ID 只有在启动器配置一致时才能共享连接，工作目录可以不同。相同 ID 对应不同启动器时，会明确报告配置冲突，不会替换其他工作区的目标。仅在项目中声明的环境，只对其已信任工作区可用。恢复来源于项目声明的会话时，要求该项目声明仍存在且工作区仍被信任，即使用户配置中还有完全相同的启动器也不能绕过此检查。
 
 完整字段参考见 [`environments`](../configuration/config-files.md#environments)。
 

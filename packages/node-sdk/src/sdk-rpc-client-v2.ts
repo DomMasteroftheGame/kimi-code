@@ -769,6 +769,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     return {
       trusted: false,
       gatedMcpServers: activation.mcpServers,
+      gatedEnvironments: activation.environments,
       gatedAdditionalDirs: activation.additionalDirs,
       additionalDirSources: activation.additionalDirSources,
       warnings: activation.warnings,
@@ -1960,11 +1961,13 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    * declarations (type).
    */
   override async listEnvironments(input: SessionIdRpcInput): Promise<SessionEnvironmentsInfo> {
-    this.requireLiveSession(input.sessionId);
-    const declarations = await this.engineAccessor.get(IEnvironmentDeclarationService).declarations();
+    const session = this.requireLiveSession(input.sessionId);
+    const workspaceId = session.accessor.get(ISessionContext).workspaceId;
+    const declarationService = this.engineAccessor.get(IEnvironmentDeclarationService);
+    const declarations = await declarationService.declarations(workspaceId);
     const entries = new Map((declarations?.entries ?? []).map((declaration) => [declaration.id, declaration.entry]));
     return {
-      environments: this.engineAccessor.get(IEnvironmentService).snapshot().environments.map((environment) => {
+      environments: this.engineAccessor.get(IEnvironmentService).snapshot().environments.filter((environment) => declarationService.isVisible(workspaceId, environment.environmentId)).map((environment) => {
         const { defaultCwd: _defaultCwd, ...info } = environmentEntryInfo(environment, entries.get(environment.environmentId));
         return info;
       }),

@@ -25,6 +25,8 @@ import type {
 import type { SessionLifecycleService } from '#/workspace/sessionLifecycle/sessionLifecycleService';
 import type { WorkspaceInstance } from '#/workspace/workspaceInstance/workspaceInstance';
 import type { IWorkspaceInstanceManager } from '#/workspace/workspaceInstance/workspaceInstanceManager';
+import type { IWorkspaceTrust } from '#/workspace/workspaceTrust/workspaceTrust';
+import type { IWorkspaceContext } from '#/workspace/workspaceContext/workspaceContext';
 
 
 function makeSessionManager(
@@ -36,6 +38,7 @@ function makeSessionManager(
     readonly docs?: IAtomicDocumentStore;
     readonly log?: ILogService;
     readonly hostFs?: IHostFileSystem;
+    readonly declarations?: EnvironmentDeclarationService;
   } = {},
 ): SessionManager {
   const log =
@@ -49,10 +52,11 @@ function makeSessionManager(
   return new SessionManager(
     workspaces,
     index,
-    new EnvironmentDeclarationService(
+    overrides.declarations ?? new EnvironmentDeclarationService(
       overrides.config ??
         ({ _serviceBrand: undefined, ready: Promise.resolve(), get: () => undefined } as unknown as IConfigService),
       log,
+      environments,
     ),
     log,
     environments,
@@ -570,7 +574,7 @@ describe('SessionManager controller retirement', () => {
     let nextSession = 0;
     const program = new Program(
       'workspace',
-      registry,
+      registry as unknown as IEnvironmentService,
       {
         _serviceBrand: undefined,
         workspaceId: 'workspace',
@@ -587,6 +591,7 @@ describe('SessionManager controller retirement', () => {
       },
       {
         agentProfiles: { entries: () => [] },
+        environmentDeclarations: { assertAllowed: () => {} },
         createSessionController: (input: ProgramSessionControllerInput) => {
           const didCreate = new Emitter<SessionCreatedEvent>();
           const didClose = new Emitter<SessionClosedEvent>();
@@ -991,6 +996,7 @@ describe('SessionManager remote environment wiring', () => {
       readonly stat?: (path: string) => Promise<{ isDirectory: boolean }>;
     };
     readonly hostFs?: IHostFileSystem;
+    readonly declarations?: EnvironmentDeclarationService;
   }) {
     registry = localRegistry();
     const remote = options.remote === undefined
@@ -1003,6 +1009,7 @@ describe('SessionManager remote environment wiring', () => {
       {
         config: configWith(options.config),
         hostFs: options.hostFs,
+        declarations: options.declarations,
       },
     );
     return { manager, registry, byEnvironment, createCalls, remote };
@@ -1128,6 +1135,66 @@ describe('SessionManager remote environment wiring', () => {
     expect(registry.current('sandbox')).toBe(remote!.fake);
   });
 
+  it('normalizes before stat and uses the same cwd for the controller and creation binding', async () => {
+    const stat = vi.fn(async () => ({ isDirectory: true }));
+    const { manager, createCalls, byEnvironment } = remoteWiringSetup({
+      config: { sandbox: { command: 'sandbox', defaultCwd: '/remote//project/./sub/..' } },
+      remote: { stat },
+    });
+    await manager.create({ workDir: '/workspace', environmentId: 'sandbox' });
+    expect(stat).toHaveBeenCalledWith('/remote/project');
+    expect(createCalls).toEqual([{ environmentId: 'sandbox', cwd: '/remote/project' }]);
+    expect(byEnvironment.get('sandbox')!.options[0]).toMatchObject({ environmentCwd: '/remote/project' });
+  });
+
+  it('rejects relative and unexpanded home paths before opening a remote connection', async () => {
+    const { manager, remote } = remoteWiringSetup({ config: { sandbox: { command: 'sandbox' } }, remote: {} });
+    for (const cwd of ['relative', '~/repo', 'C:\\repo']) {
+      await expect(manager.create({ workDir: '/workspace', environmentId: 'sandbox', environmentCwd: cwd })).rejects.toMatchObject({ code: 'environment.invalid_cwd' });
+    }
+    expect(remote!.calls).toEqual([]);
+  });
+
+  it('preserves an undeclared dynamic environment cwd during create', async () => {
+    const stat = vi.fn(async () => ({ isDirectory: true }));
+    const { manager, createCalls, byEnvironment } = remoteWiringSetup({ config: undefined, remote: { stat } });
+    const cwd = 'C:\\repo\\src';
+    await manager.create({ workDir: '/workspace', environmentId: 'sandbox', environmentCwd: cwd });
+    expect(stat).toHaveBeenCalledWith(cwd);
+    expect(createCalls).toEqual([{ environmentId: 'sandbox', cwd }]);
+    expect(byEnvironment.get('sandbox')!.options[0]).toMatchObject({ environmentCwd: cwd });
+  });
+
+  it('does not validate a raw symlink-parent path and then execute a different lexical path', async () => {
+    const stat = vi.fn(async (path: string) => {
+      if (path === '/project/link/../target') return { isDirectory: true };
+      throw new Error('ENOENT');
+    });
+    const { manager, byEnvironment } = remoteWiringSetup({ config: { sandbox: { command: 'sandbox' } }, remote: { stat } });
+    await expect(manager.create({ workDir: '/workspace', environmentId: 'sandbox', environmentCwd: '/project/link/../target' })).rejects.toMatchObject({ code: 'environment.invalid_cwd' });
+    expect(stat).toHaveBeenCalledWith('/project/target');
+    expect(byEnvironment.size).toBe(0);
+  });
+
+  it('uses a trusted project default and blocks an untrusted default without affecting explicit local creation', async () => {
+    const declarations = new EnvironmentDeclarationService(configWith(undefined), { warn() {} } as never, new EnvironmentRegistry());
+    let trusted = false;
+    const attachment = declarations.attachWorkspace(
+      { workspaceId: 'workspace-1', cwd: '/workspace', source: 'local' } as IWorkspaceContext,
+      { readText: async () => 'default = "sandbox"\n[sandbox]\ncommand = "sandbox"\ndefaultCwd = "/remote/project"' } as unknown as IHostFileSystem,
+      { ready: Promise.resolve(), isTrusted: () => trusted, onDidChange: Event.None } as unknown as IWorkspaceTrust,
+    );
+    const { manager, byEnvironment, remote } = remoteWiringSetup({ config: undefined, declarations, remote: {} });
+    await expect(manager.create({ workDir: '/workspace' })).rejects.toThrow('Trust the local workspace');
+    expect(remote!.calls).toEqual([]);
+    await manager.create({ workDir: '/workspace', environmentId: 'local' });
+    trusted = true;
+    await manager.create({ workDir: '/workspace' });
+    expect(byEnvironment.get('sandbox')!.options[0]).toMatchObject({ environmentId: 'sandbox', environmentCwd: '/remote/project', environmentProject: true });
+    attachment.dispose();
+    declarations.dispose();
+  });
+
   it('creates a controller per session cwd on the same environment', async () => {
     const { manager, createCalls } = remoteWiringSetup({
       config: { sandbox: { command: 'sandbox', defaultCwd: '/home/me/sandbox' } },
@@ -1172,6 +1239,8 @@ describe('SessionManager remote environment wiring', () => {
     readonly persistedEnvironmentId?: string;
     readonly persistedCwd?: string | null;
     readonly connectFails?: boolean;
+    readonly project?: boolean;
+    readonly declared?: boolean;
   }) {
     registry = localRegistry();
     const remote = new FakeEnvironment(
@@ -1198,11 +1267,13 @@ describe('SessionManager remote environment wiring', () => {
         archived: false,
         environmentId: persistedEnvironmentId,
         environmentCwd: persistedCwd ?? undefined,
+        environmentProject: options.project,
       }),
     } as unknown as IAtomicDocumentStore;
     const warn = vi.fn();
     manager = makeSessionManager(workspacesFor(registry, program), index, {
       docs,
+      config: options.declared ? configWith({ remote: { command: 'remote' } }) : undefined,
       log: { _serviceBrand: undefined, warn, info: () => {}, error: () => {} } as unknown as ILogService,
     });
     return { manager, byEnvironment, createCalls, registry, remote, remoteConnect, warn };
@@ -1223,6 +1294,26 @@ describe('SessionManager remote environment wiring', () => {
     expect(registry.current('remote')!.identity.generation).toBe('remote-one');
     expect(registry.current('remote')!.status).toBe('ready');
     registry.acquire({ environmentId: 'remote' }).dispose();
+  });
+
+  it('normalizes older absolute persisted cwds without using current defaultCwd', async () => {
+    const { manager, createCalls } = restoreSetup({ remoteStatus: 'disconnected', persistedCwd: '/remote//old/./sub/..', declared: true });
+    await manager.resume('session-1');
+    expect(createCalls).toEqual([{ environmentId: 'remote', cwd: '/remote/old' }]);
+  });
+
+  it('preserves native cwd when restoring an undeclared dynamic environment', async () => {
+    const cwd = 'C:\\repo\\src';
+    const { manager, createCalls } = restoreSetup({ remoteStatus: 'ready', persistedCwd: cwd });
+    await manager.resume('session-1');
+    expect(createCalls).toEqual([{ environmentId: 'remote', cwd }]);
+  });
+
+  it('does not reconnect a project-origin binding without its trusted local declaration', async () => {
+    const { manager, remoteConnect, createCalls } = restoreSetup({ remoteStatus: 'disconnected', project: true });
+    await expect(manager.resume('session-1')).rejects.toThrow('trusted declaration');
+    expect(remoteConnect).not.toHaveBeenCalled();
+    expect(createCalls).toEqual([]);
   });
 
   it('fails the resume loudly when the persisted environment cannot connect', async () => {

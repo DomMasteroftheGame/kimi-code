@@ -332,6 +332,71 @@ describe('SDKRpcClientV2 (agent-core-v2 wiring)', () => {
     }
   });
 
+  it('persists project provenance and refuses restore after its declaration disappears even when a user launcher remains', async () => {
+    const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-project-work-'));
+    const remoteDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-project-remote-'));
+    tempDirs.push(workDir, remoteDir);
+    const { harness, client, homeDir } = await makeEnvironmentHarness({ defaultCwd: remoteDir });
+    const provider = await attachFakeBoxEnvironment(client);
+    await mkdir(join(workDir, '.kimi-code'));
+    const declarationPath = join(workDir, '.kimi-code', 'environments.toml');
+    await writeFile(declarationPath, `default = "fake-box"\n[fake-box]\ntype = "ssh"\nhost = "fake-box"\ndefaultCwd = ${JSON.stringify(remoteDir)}`);
+    try {
+      await expect(harness.createSession({ workDir })).rejects.toThrow('Trust the local workspace');
+      await harness.trustWorkspace(workDir);
+      const session = await harness.createSession({ workDir, model: 'stub' });
+      expect(await session.getEnvironment()).toMatchObject({ environmentId: 'fake-box', cwd: remoteDir });
+      const meta = JSON.parse(await readFile(join(await findSessionDir(homeDir, session.id), 'state.json'), 'utf-8'));
+      expect(meta).toMatchObject({ environmentId: 'fake-box', environmentCwd: remoteDir, environmentProject: true });
+      await session.close();
+      await client.engineAccessor.get(ISessionManager).resume(session.id);
+      expect(await client.getEnvironment({ sessionId: session.id })).toMatchObject({ environmentId: 'fake-box', cwd: remoteDir });
+      await client.engineAccessor.get(ISessionManager).close(session.id);
+      await rm(declarationPath);
+      await expect(client.engineAccessor.get(ISessionManager).resume(session.id)).rejects.toThrow('trusted declaration');
+    } finally {
+      await provider.dispose();
+      await harness.close();
+    }
+  });
+
+  it('revokes live project access without revoking the identical user launcher', async () => {
+    const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-project-live-'));
+    const remoteDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-project-target-'));
+    tempDirs.push(workDir, remoteDir);
+    const { harness, client } = await makeEnvironmentHarness({ defaultCwd: remoteDir });
+    const provider = await attachFakeBoxEnvironment(client);
+    await mkdir(join(workDir, '.kimi-code'));
+    const declarationPath = join(workDir, '.kimi-code', 'environments.toml');
+    await writeFile(declarationPath, `default = "fake-box"\n[fake-box]\ntype = "ssh"\nhost = "fake-box"\ndefaultCwd = ${JSON.stringify(remoteDir)}`);
+    try {
+      await harness.trustWorkspace(workDir);
+      const session = await harness.createSession({ workDir, model: 'stub' });
+      const handle = getLiveSessionById(client.engineAccessor, session.id)!;
+      const resolver = handle.accessor.get(IEnvironmentService);
+      const binding = { environmentId: 'fake-box', cwd: remoteDir };
+      resolver.acquire(binding, ['fs']).dispose();
+      const workspace = client.engineAccessor.get(IWorkspaceInstanceManager).get(handle.accessor.get(ISessionContext).workspaceId)!;
+      await workspace.program.trust.untrust();
+      expect(() => resolver.acquire(binding, ['fs'])).toThrow('trusted declaration');
+      await expect(resolver.acquireWhenReady(binding, ['fs'])).rejects.toThrow('trusted declaration');
+      const userSession = await harness.createSession({ workDir, environmentId: 'fake-box', model: 'stub' });
+      const userResolver = getLiveSessionById(client.engineAccessor, userSession.id)!.accessor.get(IEnvironmentService);
+      userResolver.acquire(binding, ['fs']).dispose();
+      await workspace.program.trust.trust();
+      await client.listEnvironments({ sessionId: session.id });
+      resolver.acquire(binding, ['fs']).dispose();
+      await rm(declarationPath);
+      await client.listEnvironments({ sessionId: session.id });
+      expect(() => resolver.inspect(binding)).toThrow('trusted declaration');
+      userResolver.acquire(binding, ['fs']).dispose();
+    } finally {
+      await provider.dispose();
+      await harness.close();
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('prepares remote prompt context only once when creating each session with model overrides', async () => {
     const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-new-work-'));
     const remoteDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-new-remote-'));
@@ -2017,6 +2082,24 @@ describe('SDKRpcClientV2 workspace trust', () => {
     }
   });
 
+  it('previews local project environment launchers without connecting or disclosing environment values', async () => {
+    const { harness } = await makeHarness();
+    const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-env-preview-'));
+    tempDirs.push(workDir);
+    await mkdir(join(workDir, '.kimi-code'));
+    await writeFile(join(workDir, '.kimi-code', 'environments.toml'), '[dev]\ncommand = "example-launcher"\nargs = ["connect"]\nenv = { TOKEN = "private-value" }\ndefaultCwd = "/remote/project"');
+    try {
+      const info = await harness.getWorkspaceTrustInfo(workDir);
+      expect(info.gatedEnvironments).toEqual([{
+        id: 'dev', launcher: '{"type":"command","program":"example-launcher","args":["connect"]}',
+        defaultCwd: '/remote/project', origin: join(await realpath(workDir), '.kimi-code', 'environments.toml'), envKeys: ['TOKEN'],
+      }]);
+      expect(JSON.stringify(info)).not.toContain('private-value');
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('reports project servers that override same-named user entries', async () => {
     const { harness, homeDir } = await makeHarness();
     const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-work-'));
@@ -2077,6 +2160,7 @@ describe('SDKRpcClientV2 workspace trust', () => {
       expect(info).toEqual({
         trusted: false,
         gatedMcpServers: [],
+        gatedEnvironments: [],
         gatedAdditionalDirs: [],
         additionalDirSources: [],
         warnings: expect.arrayContaining([

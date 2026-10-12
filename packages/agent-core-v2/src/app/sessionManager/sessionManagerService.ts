@@ -6,6 +6,7 @@ import { ScopeActivation, registerScopedService, type ISessionScopeHandle } from
 import { ILogService } from '#/_base/log/log';
 import { LifecycleScope } from '#/app/scopes';
 import { IEnvironmentDeclarationService } from '#/app/environmentDeclaration/environmentDeclaration';
+import { normalizeRemoteCwd } from '#/environment/environmentDefaults';
 import { Error2, ErrorCodes, unwrapErrorCause } from '#/errors';
 import { environmentBindingId, LOCAL_ENVIRONMENT_ID, type EnvironmentBinding } from '#/environment/environment';
 import { EnvironmentError, environmentIsReady } from '#/environment/environmentRegistry';
@@ -78,7 +79,20 @@ export class SessionManager implements ISessionManager {
 
   async create(options: CreateManagedSessionOptions): Promise<ISessionScopeHandle> {
     await this.environments.ready;
-    const declarations = await this.environmentDeclarations.declarations();
+    if (options.workDir !== undefined && (options.environmentId === undefined || options.environmentId === LOCAL_ENVIRONMENT_ID)) {
+      const userDefault = options.environmentId === undefined ? (await this.environmentDeclarations.declarations())?.default : undefined;
+      if (userDefault === undefined || userDefault.environmentId === LOCAL_ENVIRONMENT_ID) await this.assertUsableWorkDir(options.workDir);
+    }
+    const workspace = await this.workspaces.getOrCreate(
+      options.workspaceId === undefined
+        ? { root: options.workDir }
+        : { workspaceId: options.workspaceId, root: options.workDir },
+    );
+    const declarations = await this.environmentDeclarations.declarations(workspace.id);
+    if (options.environmentId === undefined) {
+      if (declarations?.trustRequired) throw new Error2(ErrorCodes.CONFIG_INVALID, 'Trust the local workspace before using its .kimi-code/environments.toml default, or explicitly select an environment');
+      if (declarations?.projectError !== undefined) throw declarations.projectError;
+    }
     const requestedEnvironmentId = options.environmentId;
     const explicitRemote =
       requestedEnvironmentId !== undefined && requestedEnvironmentId !== LOCAL_ENVIRONMENT_ID;
@@ -87,6 +101,7 @@ export class SessionManager implements ISessionManager {
       ? declarations?.entries.find((entry) => entry.id === requestedEnvironmentId)
       : undefined;
     if (explicitRemote) {
+      this.environmentDeclarations.assertAllowed(workspace.id, requestedEnvironmentId);
       if (declared === undefined && registered === undefined) {
         if (declarations === undefined) {
           throw new Error2(
@@ -110,25 +125,25 @@ export class SessionManager implements ISessionManager {
     }
     const resolved = options.environmentId === undefined ? declarations?.default : undefined;
     const environmentId = options.environmentId ?? resolved?.environmentId;
-    const environmentCwd = options.environmentCwd ?? resolved?.cwd ?? declared?.entry.defaultCwd;
+    const requestedCwd = options.environmentCwd ?? resolved?.cwd ?? declared?.entry.defaultCwd;
+    const environmentCwd = environmentId !== undefined && this.environmentDeclarations.isDeclared(environmentId) && requestedCwd !== undefined
+      ? normalizeRemoteCwd(requestedCwd)
+      : requestedCwd;
     const effective =
       environmentId === undefined && environmentCwd === undefined
         ? options
-        : { ...options, environmentId, environmentCwd };
-    if ((environmentId === undefined || environmentId === LOCAL_ENVIRONMENT_ID) && options.workDir !== undefined) {
-      await this.assertUsableWorkDir(options.workDir);
-    }
-    const workspace = await this.workspaces.getOrCreate(
-      options.workspaceId === undefined
-        ? { root: options.workDir }
-        : { workspaceId: options.workspaceId, root: options.workDir },
-    );
+        : {
+            ...options, environmentId, environmentCwd,
+            environmentProject: (resolved?.source ?? declared?.source) === 'project' ? true : undefined,
+            ensureMainAgent: environmentId !== undefined && environmentId !== LOCAL_ENVIRONMENT_ID ? true : options.ensureMainAgent,
+          };
     const create = async () => {
+      if (environmentId !== undefined) this.environmentDeclarations.assertAllowed(workspace.id, environmentId);
       if (environmentId !== undefined) await this.connectForCreate(environmentId, environmentCwd);
       const controllerEnvironmentId = environmentId ?? LOCAL_ENVIRONMENT_ID;
       if (controllerEnvironmentId !== LOCAL_ENVIRONMENT_ID) this.assertControllerEnvironmentReady(controllerEnvironmentId);
       const controllerCwd = controllerEnvironmentId === LOCAL_ENVIRONMENT_ID ? undefined : environmentCwd ?? options.workDir;
-      return this.controllerForWorkspace(workspace.id, controllerEnvironmentId, controllerCwd).create(effective);
+      return this.controllerForWorkspace(workspace.id, controllerEnvironmentId, controllerCwd, effective.environmentProject).create(effective);
     };
     if (options.sessionId === undefined) return create();
     return this.serializeLifecycle(options.sessionId, create);
@@ -380,14 +395,14 @@ export class SessionManager implements ISessionManager {
     this.didForkEmitter.dispose();
   }
 
-  private controllerForWorkspace(workspaceId: string, environmentId: string = LOCAL_ENVIRONMENT_ID, cwd?: string): SessionLifecycleService {
+  private controllerForWorkspace(workspaceId: string, environmentId: string = LOCAL_ENVIRONMENT_ID, cwd?: string, project = false): SessionLifecycleService {
     const workspace = this.workspaces.get(workspaceId);
     if (workspace === undefined) throw new Error(`workspace ${workspaceId} is not materialized`);
-    const key = `${workspaceId}\0${environmentBindingId(environmentId, cwd)}`;
+    const key = `${workspaceId}\0${environmentBindingId(environmentId, cwd)}\0${project}`;
     const generation = workspace.program.sessionControllerGenerationFor(environmentId, cwd);
     const existing = this.controllers.get(key);
     if (existing?.generation === generation) return existing.controller;
-    const controller = workspace.program.createSessionController(environmentId, cwd);
+    const controller = workspace.program.createSessionController(environmentId, cwd, project);
     const subscriptions = new DisposableStore();
     const entry: SessionControllerEntry = { generation, controller, subscriptions, sessionCount: 0 };
     subscriptions.add(controller.onWillCreateSession((event) => this.willCreateEmitter.fire(event)));
@@ -442,6 +457,8 @@ export class SessionManager implements ISessionManager {
     const persistedBinding = await this.readPersistedBinding(workspace.id, sessionId);
     const boundEnvironmentId = persistedBinding?.environmentId ?? LOCAL_ENVIRONMENT_ID;
     if (boundEnvironmentId === LOCAL_ENVIRONMENT_ID) return this.controllerForWorkspace(workspace.id);
+    await this.environmentDeclarations.declarations(workspace.id);
+    this.environmentDeclarations.assertAllowed(workspace.id, boundEnvironmentId, persistedBinding?.project);
     try {
       await this.connectBoundEnvironment(boundEnvironmentId);
     } catch (error) {
@@ -452,17 +469,17 @@ export class SessionManager implements ISessionManager {
       );
       throw error;
     }
-    return this.controllerForWorkspace(workspace.id, boundEnvironmentId, persistedBinding?.cwd);
+    return this.controllerForWorkspace(workspace.id, boundEnvironmentId, persistedBinding?.cwd === undefined || !this.environmentDeclarations.isDeclared(boundEnvironmentId) ? persistedBinding?.cwd : normalizeRemoteCwd(persistedBinding.cwd), persistedBinding?.project);
   }
 
-  private async readPersistedBinding(workspaceId: string, sessionId: string): Promise<EnvironmentBinding | undefined> {
+  private async readPersistedBinding(workspaceId: string, sessionId: string): Promise<(EnvironmentBinding & { readonly project?: boolean }) | undefined> {
     const scope = sessionScopeOf(
       workspacePersistenceScope(this.bootstrap.scope('sessions'), workspaceId),
       sessionId,
     );
     const meta = await this.docs.get<SessionMeta>(scope, 'state.json');
     if (meta?.environmentId === undefined) return undefined;
-    return { environmentId: meta.environmentId, cwd: meta.environmentCwd };
+    return { environmentId: meta.environmentId, cwd: meta.environmentCwd, project: meta.environmentProject };
   }
 }
 

@@ -27,6 +27,7 @@ export interface SessionMeta {
   readonly cwd?: string;
   readonly environmentId?: string;
   readonly environmentCwd?: string;
+  readonly environmentProject?: boolean;
   readonly forkedFrom?: string;
   readonly agents?: Readonly<Record<string, AgentMeta>>;
   readonly custom?: Record<string, unknown>;

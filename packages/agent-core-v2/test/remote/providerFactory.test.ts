@@ -1,8 +1,14 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { Emitter } from '#/_base/event';
 import { ILogService } from '#/_base/log/log';
 import { IConfigService, type ConfigSectionChangedEvent } from '#/app/config/config';
+import { IEnvironmentDeclarationService } from '#/app/environmentDeclaration/environmentDeclaration';
+import { EnvironmentDeclarationService } from '#/app/environmentDeclaration/environmentDeclarationService';
+import { ITelemetryService, noopTelemetryService, type TelemetryAppenderRecord } from '#/app/telemetry/telemetry';
+import { TelemetryService } from '#/app/telemetry/telemetryService';
+import type { IWorkspaceTrust } from '#/workspace/workspaceTrust/workspaceTrust';
+import type { IWorkspaceContext } from '#/workspace/workspaceContext/workspaceContext';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { HostFsError, OsFsErrors } from '#/os/interface/hostFsErrors';
 import { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStore';
@@ -89,8 +95,13 @@ const NOOP_LOG = {
 
 const NO_ABORT = new AbortController().signal;
 
+beforeEach(() => vi.stubEnv('KIMI_CODE_WATCH', 'false'));
+afterEach(() => vi.unstubAllEnvs());
+
 
 interface HostServices {
+  readonly declarations: EnvironmentDeclarationService;
+  readonly telemetry: ITelemetryService;
   readonly config: IConfigService;
   readonly fs: IHostFileSystem;
   readonly docs: IAtomicDocumentStore;
@@ -104,6 +115,8 @@ function fakeHost(services: HostServices, registry: EnvironmentRegistry): Enviro
       if (id === IHostFileSystem) return services.fs;
       if (id === IAtomicDocumentStore) return services.docs;
       if (id === ILogService) return services.log;
+      if (id === IEnvironmentDeclarationService) return services.declarations;
+      if (id === ITelemetryService) return services.telemetry;
       throw new Error('unexpected service');
     },
     provide: () => {
@@ -135,11 +148,13 @@ function closingEnvironment(options: RemoteEnvironmentOptions, generation: strin
   return environment as unknown as RemoteEnvironment;
 }
 
-function baseServices(overrides: Partial<HostServices> = {}): HostServices {
+function baseServices(registry: EnvironmentRegistry, overrides: Partial<HostServices> = {}): HostServices {
+  const config = overrides.config ?? configService({ 'dev-box': { type: 'ssh', host: 'dev-box', defaultCwd: '/home/me' } });
+  const log = overrides.log ?? NOOP_LOG;
   return {
-    config: configService({
-      'dev-box': { type: 'ssh', host: 'dev-box', defaultCwd: '/home/me' },
-    }),
+    config,
+    declarations: new EnvironmentDeclarationService(config, log, registry),
+    telemetry: noopTelemetryService,
     fs: fsService({}),
     docs: docsService(),
     log: NOOP_LOG,
@@ -152,11 +167,26 @@ function factoryOptions(extra: RemoteEnvironmentProviderFactoryOptions = {}): Re
 }
 
 describe('RemoteEnvironmentProviderFactory', () => {
+  it('retries an initial registration failure after the conflicting dynamic environment is removed', async () => {
+    const registry = new EnvironmentRegistry();
+    const dynamic = registry.register(new FakeEnvironment({ environmentId: 'dev-box', generation: 'dynamic' }));
+    const services = baseServices(registry);
+    const provider = await new RemoteEnvironmentProviderFactory().attach(fakeHost(services, registry));
+    expect(() => { services.declarations.assertAllowed('workspace', 'dev-box'); }).toThrow('could not be registered');
+    await dynamic.remove();
+    await services.declarations.declarations();
+    expect(registry.current('dev-box')?.status).toBe('pending');
+    expect(() => { services.declarations.assertAllowed('workspace', 'dev-box'); }).not.toThrow();
+    await provider.dispose();
+    services.declarations.dispose();
+    await registry.dispose();
+  });
+
   it('registers declared environments as pending placeholders without connecting', async () => {
     const registry = new EnvironmentRegistry();
     const connect = vi.fn(async (options: RemoteEnvironmentOptions) => connectedEnvironment(options, 'connected-1'));
     const factory = new RemoteEnvironmentProviderFactory(factoryOptions({ connect }));
-    const attachment = await factory.attach(fakeHost(baseServices(), registry));
+    const attachment = await factory.attach(fakeHost(baseServices(registry), registry));
 
     const registered = registry.current('dev-box');
     expect(registered).toBeDefined();
@@ -175,7 +205,7 @@ describe('RemoteEnvironmentProviderFactory', () => {
     const registry = new EnvironmentRegistry();
     const connect = vi.fn(async (options: RemoteEnvironmentOptions) => connectedEnvironment(options, 'connected-1'));
     const factory = new RemoteEnvironmentProviderFactory(factoryOptions({ connect }));
-    const attachment = await factory.attach(fakeHost(baseServices(), registry));
+    const attachment = await factory.attach(fakeHost(baseServices(registry), registry));
 
     const placeholder = registry.current('dev-box')!;
     const generation = placeholder.identity.generation;
@@ -205,7 +235,7 @@ describe('RemoteEnvironmentProviderFactory', () => {
       return connectedEnvironment(options, 'connected-1');
     });
     const factory = new RemoteEnvironmentProviderFactory(factoryOptions({ connect }));
-    const attachment = await factory.attach(fakeHost(baseServices(), registry));
+    const attachment = await factory.attach(fakeHost(baseServices(registry), registry));
 
     const placeholder = registry.current('dev-box')!;
     const statuses: string[] = [];
@@ -239,7 +269,7 @@ describe('RemoteEnvironmentProviderFactory', () => {
       throw failure;
     });
     const factory = new RemoteEnvironmentProviderFactory(factoryOptions({ connect }));
-    const attachment = await factory.attach(fakeHost(baseServices(), registry));
+    const attachment = await factory.attach(fakeHost(baseServices(registry), registry));
 
     const placeholder = registry.current('dev-box')!;
     await expect(placeholder.connect!()).rejects.toBe(failure);
@@ -269,7 +299,7 @@ describe('RemoteEnvironmentProviderFactory', () => {
       return connectedEnvironment(options, 'connected-1');
     });
     const factory = new RemoteEnvironmentProviderFactory(factoryOptions({ connect }));
-    const attachment = await factory.attach(fakeHost(baseServices(), registry));
+    const attachment = await factory.attach(fakeHost(baseServices(registry), registry));
 
     const placeholder = registry.current('dev-box')!;
     void placeholder.connect!();
@@ -305,7 +335,7 @@ describe('RemoteEnvironmentProviderFactory', () => {
       return closingEnvironment(options, `connected-${current}`, 'control call fs/read timed out after 60000ms; closing the connection');
     });
     const factory = new RemoteEnvironmentProviderFactory(factoryOptions({ connect }));
-    const attachment = await factory.attach(fakeHost(baseServices(), registry));
+    const attachment = await factory.attach(fakeHost(baseServices(registry), registry));
 
     await registry.current('dev-box')!.connect!();
     const managed = registry.current('dev-box')!;
@@ -356,7 +386,7 @@ describe('RemoteEnvironmentProviderFactory', () => {
       return closingEnvironment(options, `connected-${generation}`, 'control call fs/read timed out after 60000ms; closing the connection');
     });
     const factory = new RemoteEnvironmentProviderFactory(factoryOptions({ connect }));
-    const attachment = await factory.attach(fakeHost(baseServices(), registry));
+    const attachment = await factory.attach(fakeHost(baseServices(registry), registry));
 
     await registry.current('dev-box')!.connect!();
     const managed = registry.current('dev-box')!;
@@ -388,7 +418,7 @@ describe('RemoteEnvironmentProviderFactory', () => {
       return environment;
     });
     const factory = new RemoteEnvironmentProviderFactory(factoryOptions({ connect }));
-    const attachment = await factory.attach(fakeHost(baseServices(), registry));
+    const attachment = await factory.attach(fakeHost(baseServices(registry), registry));
 
     await registry.current('dev-box')!.connect!();
     const first = registry.current('dev-box')!;
@@ -425,7 +455,7 @@ describe('RemoteEnvironmentProviderFactory', () => {
       return environment;
     });
     const factory = new RemoteEnvironmentProviderFactory(factoryOptions({ connect }));
-    const attachment = await factory.attach(fakeHost(baseServices(), registry));
+    const attachment = await factory.attach(fakeHost(baseServices(registry), registry));
 
     await registry.current('dev-box')!.connect!();
     const managed = registry.current('dev-box')!;
@@ -448,7 +478,7 @@ describe('RemoteEnvironmentProviderFactory', () => {
     const connect = vi.fn(async (options: RemoteEnvironmentOptions) =>
       closingEnvironment(options, 'connected-1', 'control call fs/read timed out after 60000ms; closing the connection'));
     const factory = new RemoteEnvironmentProviderFactory(factoryOptions({ connect }));
-    const attachment = await factory.attach(fakeHost(baseServices(), registry));
+    const attachment = await factory.attach(fakeHost(baseServices(registry), registry));
 
     await registry.current('dev-box')!.connect!();
     const managed = registry.current('dev-box')!;
@@ -475,7 +505,7 @@ describe('RemoteEnvironmentProviderFactory', () => {
     const connect = vi.fn(async (options: RemoteEnvironmentOptions) =>
       closingEnvironment(options, 'connected-1', 'connection closed by client'));
     const factory = new RemoteEnvironmentProviderFactory(factoryOptions({ connect }));
-    const attachment = await factory.attach(fakeHost(baseServices(), registry));
+    const attachment = await factory.attach(fakeHost(baseServices(registry), registry));
 
     await registry.current('dev-box')!.connect!();
     const managed = registry.current('dev-box')!;
@@ -491,7 +521,7 @@ describe('RemoteEnvironmentProviderFactory', () => {
   it('removes registered environments on dispose', async () => {
     const registry = new EnvironmentRegistry();
     const factory = new RemoteEnvironmentProviderFactory(factoryOptions({ connect: vi.fn() }));
-    const attachment = await factory.attach(fakeHost(baseServices(), registry));
+    const attachment = await factory.attach(fakeHost(baseServices(registry), registry));
     expect(registry.current('dev-box')).toBeDefined();
 
     await attachment.dispose();
@@ -502,8 +532,8 @@ describe('RemoteEnvironmentProviderFactory', () => {
 
 describe('shared connection', () => {
 
-  function poolServices(): HostServices {
-    return baseServices({
+  function poolServices(registry: EnvironmentRegistry): HostServices {
+    return baseServices(registry, {
       config: configService({
         'dev-box': { type: 'ssh', host: 'dev-box', defaultCwd: '/home/me' },
       }),
@@ -533,7 +563,7 @@ describe('shared connection', () => {
     const registry = new EnvironmentRegistry();
     const { connect, produced } = producingConnect();
     const factory = new RemoteEnvironmentProviderFactory(factoryOptions({ connect }));
-    const attachment = await factory.attach(fakeHost(poolServices(), registry));
+    const attachment = await factory.attach(fakeHost(poolServices(registry), registry));
     const target = registry.current('dev-box')!;
     await Promise.all([target.connect!(), target.connect!()]);
     expect(connect).toHaveBeenCalledTimes(1);
@@ -560,7 +590,7 @@ describe('shared connection', () => {
     const registry = new EnvironmentRegistry();
     const { connect, produced } = producingConnect();
     const factory = new RemoteEnvironmentProviderFactory(factoryOptions({ connect }));
-    const attachment = await factory.attach(fakeHost(poolServices(), registry));
+    const attachment = await factory.attach(fakeHost(poolServices(registry), registry));
     const target = registry.current('dev-box')!;
     await target.connect!();
     const generation = target.identity.generation;
@@ -588,7 +618,7 @@ describe('declaration watch', () => {
     });
     const connect = vi.fn();
     const factory = new RemoteEnvironmentProviderFactory(factoryOptions({ connect }));
-    const attachment = await factory.attach(fakeHost(baseServices({ config: config.service }), registry));
+    const attachment = await factory.attach(fakeHost(baseServices(registry, { config: config.service }), registry));
 
     config.setSection({
       'dev-box': { type: 'ssh', host: 'dev-box', defaultCwd: '/home/me' },
@@ -614,7 +644,7 @@ describe('declaration watch', () => {
     ));
     const config = watchableConfigService({});
     const warn = vi.fn();
-    const services = baseServices({
+    const services = baseServices(registry, {
       config: config.service,
       log: { _serviceBrand: undefined, info: () => {}, warn, error: () => {} } as unknown as ILogService,
     });
@@ -643,7 +673,7 @@ describe('declaration watch', () => {
     });
     const connect = vi.fn(async (options: RemoteEnvironmentOptions) => connectedEnvironment(options, 'connected-1'));
     const factory = new RemoteEnvironmentProviderFactory(factoryOptions({ connect }));
-    const attachment = await factory.attach(fakeHost(baseServices({ config: config.service }), registry));
+    const attachment = await factory.attach(fakeHost(baseServices(registry, { config: config.service }), registry));
 
     const before = registry.current('dev-box')!;
     const generation = before.identity.generation;
@@ -669,7 +699,7 @@ describe('declaration watch', () => {
       'dev-box': { type: 'ssh', host: 'dev-box', defaultCwd: '/home/me' },
     });
     const factory = new RemoteEnvironmentProviderFactory(factoryOptions({ connect: vi.fn() }));
-    const attachment = await factory.attach(fakeHost(baseServices({ config: config.service }), registry));
+    const attachment = await factory.attach(fakeHost(baseServices(registry, { config: config.service }), registry));
 
     const before = registry.current('dev-box')!;
     config.setSection({ 'dev-box': { defaultCwd: '/home/me', host: 'dev-box', type: 'ssh' } });
@@ -687,7 +717,7 @@ describe('declaration watch', () => {
     });
     const connect = vi.fn(async (options: RemoteEnvironmentOptions) => connectedEnvironment(options, 'connected-1'));
     const factory = new RemoteEnvironmentProviderFactory(factoryOptions({ connect }));
-    const attachment = await factory.attach(fakeHost(baseServices({ config: config.service }), registry));
+    const attachment = await factory.attach(fakeHost(baseServices(registry, { config: config.service }), registry));
 
     const before = registry.current('dev-box')!;
     await before.connect!();
@@ -715,7 +745,7 @@ describe('declaration watch', () => {
       return environment;
     });
     const factory = new RemoteEnvironmentProviderFactory(factoryOptions({ connect }));
-    const attachment = await factory.attach(fakeHost(baseServices({ config: config.service }), registry));
+    const attachment = await factory.attach(fakeHost(baseServices(registry, { config: config.service }), registry));
 
     await registry.current('dev-box')!.connect!();
     const connected = registry.current('dev-box')!;
@@ -748,7 +778,7 @@ describe('declaration watch', () => {
       'dev-box': { type: 'ssh', host: 'dev-box', defaultCwd: '/home/me' },
     });
     const factory = new RemoteEnvironmentProviderFactory(factoryOptions({ connect: vi.fn() }));
-    const attachment = await factory.attach(fakeHost(baseServices({ config: config.service }), registry));
+    const attachment = await factory.attach(fakeHost(baseServices(registry, { config: config.service }), registry));
 
     await attachment.dispose();
     config.setSection({
@@ -776,7 +806,7 @@ describe('declaration watch', () => {
       };
     }));
     const factory = new RemoteEnvironmentProviderFactory(factoryOptions({ connect }));
-    const attachment = await factory.attach(fakeHost(baseServices({ config: config.service }), registry));
+    const attachment = await factory.attach(fakeHost(baseServices(registry, { config: config.service }), registry));
 
     const connecting = registry.current('dev-box')!.connect!();
     config.setSection({ 'dev-box': { type: 'ssh', host: 'renamed-box', defaultCwd: '/home/me' } });
@@ -813,7 +843,7 @@ describe('factory executor detection', () => {
       connect,
       clientVersion: '1.2.3',
     }));
-    const attachment = await factory.attach(fakeHost(baseServices(), registry));
+    const attachment = await factory.attach(fakeHost(baseServices(registry), registry));
 
     const placeholder = registry.current('dev-box')!;
     const error = await placeholder.connect!().catch((error: unknown) => error);
@@ -830,7 +860,7 @@ describe('factory executor detection', () => {
 
   it('fails command environments with guidance', async () => {
     const registry = new EnvironmentRegistry();
-    const services = baseServices({
+    const services = baseServices(registry, {
       config: configService({
         sandbox: { command: 'sandbox', args: ['ssh'], defaultCwd: '/home/me' },
       }),
@@ -853,7 +883,7 @@ describe('factory executor detection', () => {
 describe('factory docker launcher pass-through', () => {
   it('connects with the declared docker launcher untouched, tilde remoteBin included', async () => {
     const registry = new EnvironmentRegistry();
-    const services = baseServices({
+    const services = baseServices(registry, {
       config: configService({
         'app-box': { type: 'docker', container: 'myapp', remoteBin: '~/bin/kimi' },
         'stock-box': { type: 'docker', container: 'stock' },
@@ -873,6 +903,112 @@ describe('factory docker launcher pass-through', () => {
     }));
 
     await attachment.dispose();
+    await registry.dispose();
+  });
+});
+
+describe('project connection ownership', () => {
+  it('shares a launcher across trusted projects and removes only the last owner', async () => {
+    const registry = new EnvironmentRegistry();
+    const services = baseServices(registry, { config: configService({}) });
+    const connect = vi.fn(async (options: RemoteEnvironmentOptions) => connectedEnvironment(options, 'shared'));
+    const provider = await new RemoteEnvironmentProviderFactory({ connect }).attach(fakeHost(services, registry));
+    const attach = (id: string, cwd: string) => services.declarations.attachWorkspace(
+      { workspaceId: id, cwd: `/${id}`, source: 'local' } as IWorkspaceContext,
+      fsService({ [`/${id}/.kimi-code/environments.toml`]: `[dev]\ntype = "ssh"\nhost = "dev.example.test"\ndefaultCwd = "${cwd}"` }),
+      { ready: Promise.resolve(), isTrusted: () => true, onDidChange: () => ({ dispose() {} }) } as unknown as IWorkspaceTrust,
+    );
+    const first = attach('first', '/remote/first');
+    const second = attach('second', '/remote/second');
+    await services.declarations.declarations('first');
+    const target = registry.current('dev')!;
+    await Promise.all([target.connect!(), target.connect!()]);
+    expect(connect).toHaveBeenCalledOnce();
+    expect(services.declarations.isVisible('first', 'dev')).toBe(true);
+    expect(services.declarations.isVisible('other', 'dev')).toBe(false);
+    first.dispose();
+    await services.declarations.declarations('second');
+    expect(registry.current('dev')).toBe(target);
+    expect(target.status).toBe('ready');
+    expect(services.declarations.isVisible('first', 'dev')).toBe(false);
+    second.dispose();
+    await services.declarations.catalog();
+    expect(registry.current('dev')).toBeUndefined();
+    await provider.dispose();
+    services.declarations.dispose();
+    await registry.dispose();
+  });
+});
+
+describe('connection telemetry', () => {
+  it('reports physical attempts once, initial failures separately from reconnects, and never sends raw identifiers', async () => {
+    const telemetry = new TelemetryService();
+    const records: TelemetryAppenderRecord[] = [];
+    telemetry.addAppender({ track: (record) => records.push(record) });
+    let attempt = 0;
+    const produced: FakeEnvironment[] = [];
+    const connect = vi.fn(async (options: RemoteEnvironmentOptions) => {
+      if (++attempt === 1) throw new HandshakeError('secret-host: /private/path YOUR_API_KEY', { kind: 'timeout' });
+      const environment = closingEnvironment(options, `connected-${attempt}`, 'secret-host: /private/path');
+      produced.push(environment as unknown as FakeEnvironment);
+      return environment;
+    });
+    const registry = new EnvironmentRegistry();
+    const services = baseServices(registry, { telemetry });
+    const provider = await new RemoteEnvironmentProviderFactory({ connect }).attach(fakeHost(services, registry));
+    const target = registry.current('dev-box')!;
+    await expect(target.connect!()).rejects.toThrow('secret-host');
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ event: 'environment_connected', properties: { outcome: 'error', error_type: 'timeout', is_reconnect: false } });
+    await Promise.all([target.connect!(), target.connect!()]);
+    expect(records).toHaveLength(2);
+    expect(records[1]).toMatchObject({ event: 'environment_connected', properties: { outcome: 'ok', is_reconnect: false } });
+    produced[0]!.setStatus('disconnected');
+    expect(records[2]).toMatchObject({ event: 'environment_disconnected', properties: { reason: 'other', uptime_ms: expect.any(Number) } });
+    await target.connect!();
+    expect(records[3]).toMatchObject({ event: 'environment_connected', properties: { outcome: 'ok', is_reconnect: true } });
+    await provider.dispose();
+    expect(records).toHaveLength(4);
+    const payload = JSON.stringify(records);
+    for (const privateValue of ['secret-host', '/private/path', 'YOUR_API_KEY', 'dev-box', 'sessionId']) expect(payload).not.toContain(privateValue);
+    services.declarations.dispose();
+    await registry.dispose();
+  });
+
+  it('honors telemetry opt-out and does not count shutdown as a disconnect', async () => {
+    const telemetry = new TelemetryService();
+    const track = vi.fn();
+    telemetry.addAppender({ track });
+    telemetry.setEnabled(false);
+    const registry = new EnvironmentRegistry();
+    const services = baseServices(registry, { telemetry });
+    const provider = await new RemoteEnvironmentProviderFactory({ connect: async (options) => connectedEnvironment(options, 'connected') }).attach(fakeHost(services, registry));
+    await registry.current('dev-box')!.connect!();
+    await provider.dispose();
+    expect(track).not.toHaveBeenCalled();
+    services.declarations.dispose();
+    await registry.dispose();
+  });
+
+  it('counts a stale successful handshake as cancelled, never as connected', async () => {
+    const telemetry = new TelemetryService();
+    const records: TelemetryAppenderRecord[] = [];
+    telemetry.addAppender({ track: (record) => records.push(record) });
+    let finish!: () => void;
+    const registry = new EnvironmentRegistry();
+    const services = baseServices(registry, { telemetry });
+    const provider = await new RemoteEnvironmentProviderFactory({ connect: (options) => new Promise((resolve) => {
+      finish = () => { resolve(connectedEnvironment(options, 'cancelled')); };
+    }) }).attach(fakeHost(services, registry));
+    const target = registry.current('dev-box')!;
+    const attempt = target.connect!();
+    await target.dispose();
+    finish();
+    await expect(attempt).rejects.toThrow('cancelled');
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ event: 'environment_connected', properties: { outcome: 'cancelled' } });
+    await provider.dispose();
+    services.declarations.dispose();
     await registry.dispose();
   });
 });

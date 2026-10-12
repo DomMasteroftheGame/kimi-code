@@ -2,12 +2,11 @@ import { randomUUID } from 'node:crypto';
 
 import { Emitter } from '#/_base/event';
 import { ILogService } from '#/_base/log/log';
-import { IConfigService } from '#/app/config/config';
-import { ENVIRONMENTS_SECTION } from '#/environment/configSection';
-import { resolveWorkspaceEnvironmentDeclarations } from '#/environment/environmentDeclarations';
+import { ITelemetryService } from '#/app/telemetry/telemetry';
+import { IEnvironmentDeclarationService } from '#/app/environmentDeclaration/environmentDeclaration';
+import { declarationFingerprint, toLauncherSpec } from '#/environment/environmentDeclarations';
 import type {
   RemoteEnvironmentDeclaration,
-  RemoteEnvironmentEntry,
   EnvironmentDeclarationSet,
 } from '#/environment/remoteEnvironmentDeclaration';
 import type {
@@ -23,21 +22,11 @@ import type {
 } from '#/environment/environmentProvider';
 
 import type { EnvironmentRegistrationHandle } from '#/environment/environmentRegistry';
-import { connectWithGuidance } from './connectGuidance';
+import { classifyHandshakeFailure, connectWithGuidance } from './connectGuidance';
 import type { LauncherSpec } from './launchers';
 import { RemoteEnvironment, type RemoteEnvironmentOptions } from './remoteEnvironment';
 
-export function toLauncherSpec(entry: RemoteEnvironmentEntry): LauncherSpec {
-  if ('command' in entry) {
-    return { type: 'command', program: entry.command, args: entry.args, env: entry.env };
-  }
-  switch (entry.type) {
-    case 'ssh':
-      return { type: 'ssh', host: entry.host, remoteBin: entry.remoteBin };
-    case 'docker':
-      return { type: 'docker', container: entry.container, context: entry.context, remoteBin: entry.remoteBin };
-  }
-}
+export { toLauncherSpec } from '#/environment/environmentDeclarations';
 
 const EMPTY_CAPABILITIES: ReadonlySet<EnvironmentCapability> = new Set();
 
@@ -57,12 +46,15 @@ class DeclaredRemoteEnvironment implements Environment {
   private readonly statusEmitter = new Emitter<EnvironmentStatus>();
   readonly onDidChangeStatus = this.statusEmitter.event;
   private sessionSubscription: { dispose(): void } | undefined;
+  private hasConnected = false;
+  private connectedAt = 0;
 
   constructor(
     private readonly environmentId: string,
     launcher: LauncherSpec,
     fingerprint: string,
     private readonly open: (launcher: LauncherSpec) => Promise<RemoteEnvironment>,
+    private readonly telemetry: ITelemetryService,
   ) {
     this.launcher = launcher;
     this.fingerprint = fingerprint;
@@ -120,6 +112,8 @@ class DeclaredRemoteEnvironment implements Environment {
     if (this.inflight !== undefined) return this.inflight;
     const epoch = this.epoch;
     const launcher = this.launcher;
+    const started = performance.now();
+    const isReconnect = this.hasConnected;
     this.lastConnectError = undefined;
     this.setStatus('connecting');
     const run = this.open(launcher).then((session) => {
@@ -128,8 +122,20 @@ class DeclaredRemoteEnvironment implements Environment {
         throw new Error('remote environment connect was cancelled');
       }
       this.install(session);
+      this.hasConnected = true;
+      this.connectedAt = performance.now();
       this.setStatus('ready');
+      this.telemetry.track2('environment_connected', {
+        environment_type: launcher.type, duration_ms: performance.now() - started,
+        outcome: 'ok', is_reconnect: isReconnect,
+      });
     }).catch((error: unknown) => {
+      this.telemetry.track2('environment_connected', {
+        environment_type: launcher.type, duration_ms: performance.now() - started,
+        outcome: epoch !== this.epoch ? 'cancelled' : 'error',
+        error_type: epoch !== this.epoch ? undefined : classifyHandshakeFailure(error),
+        is_reconnect: isReconnect,
+      });
       if (epoch === this.epoch && this.currentStatus === 'connecting') {
         this.lastConnectError = error instanceof Error ? error.message : String(error);
         this.setStatus('disconnected');
@@ -154,6 +160,7 @@ class DeclaredRemoteEnvironment implements Environment {
     if (this.fingerprint === fingerprint) return;
     this.fingerprint = fingerprint;
     this.launcher = launcher;
+    this.hasConnected = false;
     this.generation = `${this.environmentId}-${randomUUID()}`;
     if (this.currentStatus === 'pending') return;
     this.disconnect();
@@ -166,6 +173,11 @@ class DeclaredRemoteEnvironment implements Environment {
     this.sessionSubscription?.dispose();
     this.sessionSubscription = session.onDidChangeStatus((status) => {
       if (this.session !== session || status !== 'disconnected') return;
+      this.telemetry.track2('environment_disconnected', {
+        environment_type: this.launcher.type,
+        uptime_ms: performance.now() - this.connectedAt,
+        reason: session.connection?.closeReason?.kind ?? 'other',
+      });
       const reason = session.connection?.closeReason?.reason;
       if (reason !== undefined) this.lastConnectError = reason;
       this.session = undefined;
@@ -191,7 +203,6 @@ class DeclaredRemoteEnvironment implements Environment {
     this.statusEmitter.fire(status);
   }
 }
-
 export interface RemoteEnvironmentProviderFactoryOptions {
   readonly clientVersion?: string;
   readonly connect?: (options: RemoteEnvironmentOptions) => Promise<RemoteEnvironment>;
@@ -199,6 +210,7 @@ export interface RemoteEnvironmentProviderFactoryOptions {
 
 interface DeclaredEnvironmentRecord {
   handle: EnvironmentRegistrationHandle;
+  ownership: { dispose(): void };
   environment: DeclaredRemoteEnvironment;
   declaration: RemoteEnvironmentDeclaration;
   fingerprint: string;
@@ -211,11 +223,10 @@ export class RemoteEnvironmentProviderFactory implements EnvironmentProviderFact
 
   async attach(host: EnvironmentProviderHost): Promise<EnvironmentProviderAttachment> {
     const log = host.get(ILogService);
-    const config = host.get(IConfigService);
-    const resolve = () => resolveWorkspaceEnvironmentDeclarations(config);
+    const declarations = host.get(IEnvironmentDeclarationService);
     let initial: EnvironmentDeclarationSet;
     try {
-      initial = await resolve();
+      initial = await declarations.catalog();
     } catch (error) {
       log.warn('remote environment declarations failed to load', { error });
       return {
@@ -224,35 +235,44 @@ export class RemoteEnvironmentProviderFactory implements EnvironmentProviderFact
     }
     const records = new Map<string, DeclaredEnvironmentRecord>();
     for (const declaration of initial.entries) {
-      records.set(declaration.id, this.registerDeclaredEnvironment(host, declaration));
+      try {
+        records.set(declaration.id, this.registerDeclaredEnvironment(host, declaration));
+        declarations.reportRegistration(declaration.id);
+      } catch (error) {
+        declarations.reportRegistration(declaration.id, error instanceof Error ? error : new Error(String(error)));
+        log.warn('remote environment registration failed', { error });
+      }
     }
 
     let disposed = false;
     let tail = Promise.resolve();
-    const reconcile = (): Promise<void> => {
+    const reconcile = (resolved: EnvironmentDeclarationSet): Promise<void> => {
       tail = tail.catch(() => {}).then(async () => {
-        if (disposed) throw new Error('remote environment provider is disposed');
-        const resolved = await resolve();
         if (disposed) throw new Error('remote environment provider is disposed');
         const failures: unknown[] = [];
         const next = new Map(resolved.entries.map((declaration) => [declaration.id, declaration]));
         for (const [id, record] of records) {
           if (next.has(id)) continue;
           records.delete(id);
+          declarations.reportRegistration(id);
           try {
             await record.handle.remove();
           } catch (error) {
             failures.push(error);
+          } finally {
+            record.ownership.dispose();
           }
         }
         for (const declaration of resolved.entries) {
           if (disposed) throw new Error('remote environment provider is disposed');
-          const fingerprint = declarationFingerprint(toLauncherSpec(declaration.entry));
+          const fingerprint = declarationFingerprint(declaration.entry);
           const record = records.get(declaration.id);
           if (record === undefined) {
             try {
               records.set(declaration.id, this.registerDeclaredEnvironment(host, declaration));
+              declarations.reportRegistration(declaration.id);
             } catch (error) {
+              declarations.reportRegistration(declaration.id, error instanceof Error ? error : new Error(String(error)));
               failures.push(error);
             }
             continue;
@@ -269,11 +289,8 @@ export class RemoteEnvironmentProviderFactory implements EnvironmentProviderFact
       });
       return tail;
     };
-    const refresh = (): Promise<void> => reconcile().catch((error: unknown) => {
-      log.warn('remote environment declarations failed to reload', { error });
-    });
-    const configListener = config.onDidSectionChange((event) => {
-      if (event.domain === ENVIRONMENTS_SECTION) void refresh();
+    const configListener = declarations.onDidChange((event) => {
+      event.waitUntil(reconcile(event).catch((error: unknown) => { log.warn('remote environment declarations failed to reload', { error }); }));
     });
     return {
       dispose: async () => {
@@ -283,6 +300,7 @@ export class RemoteEnvironmentProviderFactory implements EnvironmentProviderFact
           try {
             await record.handle.remove();
           } finally {
+            record.ownership.dispose();
             records.delete(record.environment.identity.environmentId);
           }
         }
@@ -296,10 +314,12 @@ export class RemoteEnvironmentProviderFactory implements EnvironmentProviderFact
     declaration: RemoteEnvironmentDeclaration,
   ): DeclaredEnvironmentRecord {
     const launcher = toLauncherSpec(declaration.entry);
-    const fingerprint = declarationFingerprint(launcher);
-    const environment = new DeclaredRemoteEnvironment(declaration.id, launcher, fingerprint, (nextLauncher) => this.open(declaration.id, nextLauncher));
+    const fingerprint = declarationFingerprint(declaration.entry);
+    const environment = new DeclaredRemoteEnvironment(declaration.id, launcher, fingerprint, (nextLauncher) => this.open(declaration.id, nextLauncher), host.get(ITelemetryService));
     try {
-      return { handle: host.registerEnvironment(environment), environment, declaration, fingerprint };
+      const handle = host.registerEnvironment(environment);
+      const ownership = host.get(IEnvironmentDeclarationService).trackRegistration(environment);
+      return { handle, ownership, environment, declaration, fingerprint };
     } catch (error) {
       void environment.dispose();
       throw error;
@@ -317,20 +337,4 @@ export class RemoteEnvironmentProviderFactory implements EnvironmentProviderFact
       { launcher },
     );
   }
-}
-
-function declarationFingerprint(launcher: LauncherSpec): string {
-  return JSON.stringify(sortKeysDeep(launcher));
-}
-
-function sortKeysDeep(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortKeysDeep);
-  if (value !== null && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .toSorted(([a], [b]) => a.localeCompare(b))
-        .map(([key, nested]) => [key, sortKeysDeep(nested)]),
-    );
-  }
-  return value;
 }

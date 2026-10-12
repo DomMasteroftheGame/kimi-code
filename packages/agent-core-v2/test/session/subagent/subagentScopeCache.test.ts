@@ -98,6 +98,7 @@ import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceCo
 import { IEventDispatcher } from '#/state/eventDispatcher';
 import { AGENT_WIRE_RECORD_KEY, type WireRecord } from '#/wire/record';
 import { IWorkspaceInstanceManager } from '#/workspace/workspaceInstance/workspaceInstanceManager';
+import { IEnvironmentDeclarationService } from '#/app/environmentDeclaration/environmentDeclaration';
 import { IEnvironmentService, type EnvironmentResolver } from '#/app/environment/environment';
 import type { AgentEventStore } from '#human/agent/slices';
 
@@ -360,6 +361,10 @@ describe('SessionSubagentScopeCacheService', () => {
           ? 'sessions/ws_test/sess_test'
           : `sessions/ws_test/sess_test/${subKey}`,
     } as unknown as ISessionContext);
+    ix.stub(IEnvironmentDeclarationService, {
+      isDeclared: () => false,
+      declarations: async () => ({ entries: [] }),
+    });
     ix.stub(IEnvironmentService, {
       onDidChange: () => ({ dispose: () => {} }),
       _serviceBrand: undefined,
