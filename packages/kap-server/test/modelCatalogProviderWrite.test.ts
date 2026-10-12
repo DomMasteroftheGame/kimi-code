@@ -780,6 +780,25 @@ describe('server-v2 /api/v1 provider write endpoints', () => {
     });
   });
 
+  it('drops model upgrades whose target disappears on provider edit', async () => {
+    await boot(
+      `${DEFAULTED_TOML}\n[models.gpt4o.upgrade]\nmodel = "openai/gpt-4.1"\nmigration_markdown = "Use next"\n`,
+    );
+    const { status } = await putJson('/api/v1/providers/openai', {
+      ...REPLACE_BODY,
+      new_id: 'my-openai',
+      models: [{ model: 'gpt-4o', max_context_size: 128000 }],
+    });
+    expect(status).toBe(200);
+
+    const onDisk = await readConfigToml();
+    expect(onDisk['models']).not.toHaveProperty('my-openai/gpt-4o.upgrade');
+    const models = await getJson<{
+      items: Array<{ model: string; upgrade?: unknown }>;
+    }>('/api/v1/models');
+    expect(models.body.data.items.find((item) => item.model === 'my-openai/gpt-4o')?.upgrade).toBeUndefined();
+  });
+
   it('migrates default_provider on rename but leaves default_model alone when its model was dropped', async () => {
     await boot(DEFAULTED_TOML);
     const { status, body } = await putJson<unknown>(

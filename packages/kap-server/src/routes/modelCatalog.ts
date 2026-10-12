@@ -428,19 +428,17 @@ export function registerModelCatalogRoutes(app: ModelCatalogRouteHost, core: Sco
         );
         for (const entry of req.body.models) {
           const previous = previousByModel.get(entry.model);
-          const previousUpgrade = previous?.upgrade;
+          let upgrade = previous?.upgrade;
+          if (upgrade?.model.startsWith(`${provider_id}/`) === true) {
+            const target = `${newId}/${upgrade.model.slice(provider_id.length + 1)}`;
+            upgrade = newAliasKeys.has(target) ? { ...upgrade, model: target } : undefined;
+          }
           const alias: ModelRecord = {
             ...previous,
             provider: newId,
             model: entry.model,
             maxContextSize: entry.max_context_size,
-            upgrade:
-              previousUpgrade?.model.startsWith(`${provider_id}/`) === true
-                ? {
-                    ...previousUpgrade,
-                    model: `${newId}/${previousUpgrade.model.slice(provider_id.length + 1)}`,
-                  }
-                : previousUpgrade,
+            upgrade,
           };
           alias.displayName = entry.display_name !== undefined ? entry.display_name : undefined;
           alias.capabilities =
