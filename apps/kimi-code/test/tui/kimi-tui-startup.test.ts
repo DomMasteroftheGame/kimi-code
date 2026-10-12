@@ -2297,6 +2297,25 @@ describe('KimiTUI startup', () => {
     await prompt;
   });
 
+  it.each([true, false])('warns about losing the prompt cache only when the conversation has history: %s', async (withHistory) => {
+    const driver = makeDriver(makeHarness(), makeStartupInput());
+    installMigrationModels(driver);
+    if (withHistory) {
+      driver.state.transcriptEntries.push({ id: 'u1', kind: 'user', renderMode: 'plain', content: 'hello' });
+    }
+
+    const prompt = maybeShowModelMigrationPrompt(driver as any);
+    const picker = driver.state.editorContainer.children[0] as ChoicePickerComponent;
+    const output = picker.render(200).join('\n');
+    if (withHistory) {
+      expect(output).toContain('Switching models invalidates the existing prompt cache');
+    } else {
+      expect(output).not.toContain('prompt cache');
+    }
+    picker.handleInput('\u001B');
+    await prompt;
+  });
+
   it.each(['replace', 'restore'])('settles a displaced migration on editor %s without saving', async (action) => {
     const setConfig = vi.fn();
     const driver = makeDriver(makeHarness(makeSession(), { setConfig }), makeStartupInput());

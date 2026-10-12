@@ -7,7 +7,13 @@ import {
   segmentsFor,
   thinkingAvailability,
 } from '../components/dialogs/model-selector';
-import { currentTuiConfig, effectiveModelForHost, performModelSwitch } from '../commands/config';
+import {
+  currentTuiConfig,
+  effectiveModelForHost,
+  hasConversationHistory,
+  MODEL_SWITCH_CACHE_WARNING,
+  performModelSwitch,
+} from '../commands/config';
 import type { SlashCommandHost } from '../commands/dispatch';
 import { saveTuiConfig } from '../config';
 import { sanitizeShellOutput } from '../utils/shell-output';
@@ -163,10 +169,13 @@ export async function maybeShowModelMigrationPrompt(
       });
     };
 
+    const notice = migrationNotice(migration);
     host.mountEditorReplacement(
       new ChoicePickerComponent({
         title: 'Model migration available',
-        noticeMarkdown: migrationNotice(migration),
+        noticeMarkdown: hasConversationHistory(host)
+          ? `${notice}\n\n${MODEL_SWITCH_CACHE_WARNING}`
+          : notice,
         options: [
           {
             value: 'switch',
