@@ -7,6 +7,7 @@ import { literalRulePattern, matchesPathRuleSubject } from '#/tool/rule-match';
 import { IFileEditService } from '#/app/edit/fileEdit';
 import type { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { EnvironmentWorkspaceView } from '#/environment/environmentWorkspaceView';
+import { IAgentPlanService } from '#/features/plan/plan';
 import { acquireOrWhenReady, IAgentEnvironmentService, pinnedGeneration } from '#/agent/environmentBinding/agentEnvironment';
 import { ISessionSkillCatalog } from '#/features/skill/session/skillCatalog';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
@@ -31,6 +32,7 @@ export class EditTool implements IEditTool {
     @IAgentEnvironmentService private readonly environment: IAgentEnvironmentService,
     @ISessionWorkspaceContext private readonly workspaceCtx: ISessionWorkspaceContext,
     @ISessionSkillCatalog private readonly skillCatalog?: ISessionSkillCatalog,
+    @IAgentPlanService private readonly planService?: IAgentPlanService,
   ) {}
 
   private workspaceConfig(view: EnvironmentWorkspaceView): WorkspaceConfig {
@@ -38,6 +40,24 @@ export class EditTool implements IEditTool {
   }
 
   async resolveExecution(args: EditInput): Promise<ToolExecution> {
+    const planTarget = await this.planService?.resolveFile(args.path);
+    if (planTarget !== undefined) {
+      const path = planTarget.path;
+      return {
+        accesses: ToolAccesses.readWriteFile(path),
+        description: `Editing ${args.path}`,
+        display: { kind: 'file_io', operation: 'edit', path, before: args.old_string, after: args.new_string },
+        approvalRule: literalRulePattern(this.name, path),
+        matchesRule: (ruleArgs) => matchesPathRuleSubject(ruleArgs, path, {
+          cwd: planTarget.environmentPath.dirname(path), pathClass: planTarget.pathClass,
+        }),
+        execute: async () => {
+          const current = await this.planService?.resolveFile(path);
+          if (current === undefined || current.path !== path) return { isError: true, output: 'The active plan changed before execution. Retry the tool call.' };
+          return this.execution(args, path, current.fs);
+        },
+      };
+    }
     const resolutionLease = await acquireOrWhenReady(this.environment, ['fs']);
     try {
       const inspected = resolutionLease.environment;

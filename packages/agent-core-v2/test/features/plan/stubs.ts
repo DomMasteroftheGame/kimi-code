@@ -71,6 +71,21 @@ export function createMapFs(
       if (content === undefined) return Promise.reject(missingFileError(path));
       return Promise.resolve(content);
     },
+    readBytes: async (path, n) => {
+      const content = files.get(path);
+      if (content === undefined) throw missingFileError(path);
+      const bytes = Buffer.from(content);
+      return n === undefined ? bytes : bytes.subarray(0, n);
+    },
+    readLines: async function* (path) {
+      const content = files.get(path);
+      if (content === undefined) throw missingFileError(path);
+      const lines = content.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        if (i < lines.length - 1) yield `${lines[i]}\n`;
+        else if (lines[i] !== '') yield lines[i]!;
+      }
+    },
     writeText: (path, content) => {
       files.set(path, content);
       return Promise.resolve();

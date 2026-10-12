@@ -1,8 +1,10 @@
+import * as win32Path from 'node:path/win32';
+import { createMapFs } from '../../features/plan/stubs';
 import { mkdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'pathe';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SyncDescriptor } from '#/_base/di/descriptors';
 import { DisposableStore } from '#/_base/di/lifecycle';
@@ -288,7 +290,8 @@ describe('AgentTaskPersistence', () => {
   describe('environment spill mirror', () => {
     it('mirrors appended output into the spill target and reports the spill path', async () => {
       const writes: { path: string; data: string }[] = [];
-      const spill = spillPersistence(() => ({ fs: recordingAppendFs(writes), dir: '/remote/tmp/kimi-code/task-output' }));
+      const fs = recordingAppendFs(writes);
+      const spill = spillPersistence(() => ({ fs, dir: '/remote/tmp/kimi-code/task-output' }));
 
       await spill.appendTaskOutput('bash-mirror01', 'chunk-one');
       await spill.appendTaskOutput('bash-mirror01', 'chunk-two');
@@ -336,13 +339,110 @@ describe('AgentTaskPersistence', () => {
 
       await spill.appendTaskOutput(taskId, 'buffered');
 
-      current = { fs: { mkdir: async () => {}, appendText: async () => {} } as never, dir: dirA };
+      current = { fs: createMapFs(new Map()), dir: dirA };
       const first = await spill.readTaskOutputSnapshot(taskId, 100);
       expect(first?.outputPath).toBe(`${dirA}/${taskId}.log`);
 
-      current = { fs: { mkdir: async () => {}, appendText: async () => {} } as never, dir: dirB };
+      current = { fs: createMapFs(new Map()), dir: dirB };
       const second = await spill.readTaskOutputSnapshot(taskId, 100);
       expect(second?.outputPath).toBe(`${dirB}/${taskId}.log`);
+    });
+    it('isolates failures by task and repairs a missing chunk before advertising the mirror', async () => {
+      const files = new Map<string, string>();
+      let failedTask: string | undefined;
+      const fs = createMapFs(files);
+      const write = fs.writeText;
+      const append = fs.appendText;
+      fs.writeText = async (path, data) => {
+        if (path.includes(failedTask ?? '\0')) throw new Error('offline');
+        await write(path, data);
+      };
+      fs.appendText = async (path, data) => {
+        if (path.includes(failedTask ?? '\0')) throw new Error('offline');
+        await append(path, data);
+      };
+      const target = { fs, dir: '/remote/task-output' };
+      const spill = spillPersistence(() => target);
+      const a = 'bash-00000001';
+      const b = 'bash-00000002';
+      await spill.appendTaskOutput(a, 'a');
+      failedTask = a;
+      await spill.appendTaskOutput(a, 'b');
+      await spill.appendTaskOutput(b, 'other');
+      expect((await spill.readTaskOutputSnapshot(a, 100))?.outputPath).toBe(spill.taskOutputFile(a));
+      expect((await spill.readTaskOutputSnapshot(b, 100))?.outputPath).toBe(`${target.dir}/${b}.log`);
+      expect(files.get(`${target.dir}/${a}.log`)).toBe('a');
+      failedTask = undefined;
+      await spill.appendTaskOutput(a, 'c');
+      expect(files.get(`${target.dir}/${a}.log`)).toBe('abc');
+      expect((await spill.readTaskOutputSnapshot(a, 100))?.outputPath).toBe(`${target.dir}/${a}.log`);
+    });
+
+    it('repairs restored output and isolates mirrors by actual filesystem identity and directory', async () => {
+      const id = 'bash-restore1';
+      const filesA = new Map<string, string>();
+      const filesB = new Map<string, string>();
+      const a = { fs: createMapFs(filesA), dir: '/remote/task-output' };
+      const b = { fs: createMapFs(filesB), dir: a.dir };
+      let current = a;
+      const spill = spillPersistence(() => current);
+      await spill.appendTaskOutput(id, 'a');
+      current = b;
+      expect((await spill.readTaskOutputSnapshot(id, 100))?.outputPath).toBe(`${b.dir}/${id}.log`);
+      expect(filesB.get(`${b.dir}/${id}.log`)).toBe('a');
+      await spill.appendTaskOutput(id, 'b');
+      current = a;
+      await spill.readTaskOutputSnapshot(id, 100);
+      expect(filesA.get(`${a.dir}/${id}.log`)).toBe('ab');
+      current = { fs: a.fs, dir: '/remote/another-directory' };
+      await spill.readTaskOutputSnapshot(id, 100);
+      expect(filesA.get(`${current.dir}/${id}.log`)).toBe('ab');
+      filesA.set(`${current.dir}/${id}.log`, 'partial');
+      const restored = spillPersistence(() => current);
+      await restored.readTaskOutputSnapshot(id, 100);
+      expect(filesA.get(`${current.dir}/${id}.log`)).toBe('ab');
+    });
+
+    it('repairs output on snapshot after a transient append failure', async () => {
+      const files = new Map<string, string>();
+      const fs = createMapFs(files, { appendText: async () => { throw new Error('offline'); } });
+      const spill = spillPersistence(() => ({ fs, dir: '/remote/task-output' }));
+      await spill.appendTaskOutput('bash-repair01', 'a');
+      await spill.appendTaskOutput('bash-repair01', 'b');
+      const snapshot = await spill.readTaskOutputSnapshot('bash-repair01', 100);
+      expect(files.get(snapshot!.outputPath)).toBe('ab');
+    });
+
+    it('uses native UNC joins and avoids rereading complete local output on healthy appends', async () => {
+      const files = new Map<string, string>();
+      const fs = createMapFs(files);
+      const read = vi.spyOn(bytes, 'read');
+      const spill = spillPersistence(() => ({ fs, dir: '//server/share/task-output', path: win32Path }));
+      await spill.appendTaskOutput('bash-native01', 'a');
+      read.mockClear();
+      await spill.appendTaskOutput('bash-native01', 'b');
+      await spill.appendTaskOutput('bash-native01', 'c');
+      expect(read).not.toHaveBeenCalled();
+      expect(files.get('\\\\server\\share\\task-output\\bash-native01.log')).toBe('abc');
+      read.mockRestore();
+    });
+
+    it('serializes concurrent appends and snapshot repair for each task', async () => {
+      const files = new Map<string, string>();
+      const fs = createMapFs(files);
+      const write = fs.writeText;
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      fs.writeText = async (path, data) => { await gate; await write(path, data); };
+      const spill = spillPersistence(() => ({ fs, dir: '/remote/task-output' }));
+      const first = spill.appendTaskOutput('bash-concur01', 'a');
+      const second = spill.appendTaskOutput('bash-concur01', 'b');
+      const snapshot = spill.readTaskOutputSnapshot('bash-concur01', 100);
+      release();
+      await Promise.all([first, second]);
+      const result = await snapshot;
+      expect(result?.preview).toBe('ab');
+      expect(files.get(result!.outputPath)).toBe('ab');
     });
   });
 });

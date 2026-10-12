@@ -36,6 +36,9 @@ export interface RecordingAppendWrite {
 export function recordingAppendFs(writes: RecordingAppendWrite[]): IHostFileSystem {
   return {
     mkdir: async () => {},
+    writeText: async (path: string, data: string) => {
+      writes.push({ path, data });
+    },
     appendText: async (path: string, data: string) => {
       writes.push({ path, data });
     },

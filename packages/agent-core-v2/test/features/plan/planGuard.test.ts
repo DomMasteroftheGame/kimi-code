@@ -27,6 +27,7 @@ import { ITelemetryService } from '#/app/telemetry/telemetry';
 import type { ToolCall } from '#human/llm/message';
 import { IAgentEnvironmentService } from '#/agent/environmentBinding/agentEnvironment';
 import { HostFsError } from '#/os/interface/hostFsErrors';
+import { IHostEnvironment, type PathClass } from '#/os/interface/hostEnvironment';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { ToolAccesses } from '#/tool/toolContract';
 import type { ToolInputDisplay } from '#/tool/toolInputDisplay';
@@ -173,7 +174,7 @@ describe('AgentPlanService plan-guard listener', () => {
     };
   }
 
-  function buildServices(environment: IAgentEnvironmentService, sessionDir = TEMP_DIR): void {
+  function buildServices(environment: IAgentEnvironmentService, sessionDir = TEMP_DIR, pathClass: PathClass = 'posix'): void {
     const toolApproval: IAgentToolApprovalService = {
       _serviceBrand: undefined,
       resolvePermissionResolution: async () => {
@@ -192,6 +193,7 @@ describe('AgentPlanService plan-guard listener', () => {
       additionalServices: (reg) => {
         registerTestAgentWireServices(reg);
         reg.defineInstance(IAgentEnvironmentService, environment);
+        reg.definePartialInstance(IHostEnvironment, { pathClass });
         reg.defineInstance(IHostFileSystem, environment.inspect().fs ?? createFakeHostFs());
         reg.defineInstance(ISessionContext, makeSessionContext({
           sessionId: 'session',
@@ -460,6 +462,33 @@ describe('AgentPlanService plan-guard listener', () => {
 
     expect((await firstPlan.status())!.path).toBe(`${TEMP_DIR}/session-a/agents/test-agent/plans/${PLAN_ID}.md`);
     expect((await secondPlan.status())!.path).toBe(`${TEMP_DIR}/session-b/agents/test-agent/plans/${PLAN_ID}.md`);
+  });
+
+  it('preserves native Windows path semantics for plan files', async () => {
+    const environment = stubPlanEnvironment({
+      fs: createFakeHostFs({
+        mkdir: vi.fn().mockResolvedValue(undefined),
+        readText: vi.fn().mockResolvedValue(''),
+      }),
+      tempDir: 'C:\\Temp',
+    });
+    buildServices(environment, '//server/share/session', 'win32');
+    const svc = await enterPlan();
+
+    expect((await svc.status())?.path).toBe('\\\\server\\share\\session\\agents\\test-agent\\plans\\plan-1.md');
+  });
+
+  it('limits saved-plan Read routing to direct plan files owned by this agent', async () => {
+    const svc = await enterPlan();
+    svc.exit();
+    expect((await svc.resolveFile(PLAN_PATH, 'read'))?.path).toBe(PLAN_PATH);
+    expect(await svc.resolveFile(PLAN_PATH, 'write')).toBeUndefined();
+    for (const path of [
+      `${TEMP_DIR}/agents/another-agent/plans/plan-1.md`,
+      `${TEMP_DIR}/agents/test-agent/plans/nested/plan-1.md`,
+      `${TEMP_DIR}/agents/test-agent/plans/plan-1.txt`,
+      `${TEMP_DIR}/another-session/agents/test-agent/plans/plan-1.md`,
+    ]) expect(await svc.resolveFile(path, 'read')).toBeUndefined();
   });
 
   describe('exit plan mode review', () => {

@@ -1,8 +1,16 @@
-import type { IHostFileSystem } from '#/os/interface/hostFileSystem';
+import * as posixPath from 'node:path/posix';
+import * as win32Path from 'node:path/win32';
+
+import { IHostEnvironment } from '#/os/interface/hostEnvironment';
+import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
+import { isTaskOutputFilePath } from '#/agent/task/persist';
+import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { isHostFsNotDirectory, isHostFsNotFound } from '#/os/interface/hostFsErrors';
 import { acquireOrWhenReady, IAgentEnvironmentService, pinnedGeneration } from '#/agent/environmentBinding/agentEnvironment';
 import { ISessionMediaStore } from '#/agent/media/sessionMediaStore';
 import { IAgentProfileService } from '#/agent/profile/profile';
+import { IAgentPlanService, type PlanFileTarget } from '#/features/plan/plan';
 import { IAgentToolPolicyService } from '#/agent/toolPolicy/toolPolicy';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { isDaemonFileUrl } from '#/agent/media/mediaRef';
@@ -183,6 +191,11 @@ export class ReadTool implements IReadTool {
     @IAgentToolPolicyService private readonly toolPolicy: IAgentToolPolicyService,
     @IAgentToolRegistryService private readonly toolRegistry: IAgentToolRegistryService,
     @ISessionMediaStore private readonly attachmentStore?: ISessionMediaStore,
+    @IAgentPlanService private readonly planService?: IAgentPlanService,
+    @IHostFileSystem private readonly hostFs?: IHostFileSystem,
+    @IHostEnvironment private readonly hostEnvironment?: IHostEnvironment,
+    @ISessionContext private readonly session?: ISessionContext,
+    @IAgentScopeContext private readonly agent?: IAgentScopeContext,
   ) {}
 
   private limits(): { defaultMaxChars: number; maxChars: number } {
@@ -203,6 +216,10 @@ export class ReadTool implements IReadTool {
       return { isError: true, output: 'column_offset is only supported for forward reads. Use a positive line_offset or the forward Next Read arguments.' };
     }
     if (isDaemonFileUrl(args.path)) return this.attachmentExecution(args);
+    const planTarget = await this.planService?.resolveFile(args.path, 'read');
+    if (planTarget !== undefined) return this.localArtifactExecution(args, planTarget, true);
+    const artifactTarget = this.localOutputTarget(args.path);
+    if (artifactTarget !== undefined) return this.localArtifactExecution(args, artifactTarget, false);
     const resolutionLease = await acquireOrWhenReady(this.environment, ['fs']);
     try {
       const inspected = resolutionLease.environment;
@@ -246,6 +263,38 @@ export class ReadTool implements IReadTool {
     } finally {
       resolutionLease.dispose();
     }
+  }
+
+  private localOutputTarget(path: string): PlanFileTarget | undefined {
+    if (this.hostFs === undefined || this.hostEnvironment === undefined || path.includes('\0')) return undefined;
+    const environmentPath = this.hostEnvironment.pathClass === 'win32' ? win32Path : posixPath;
+    if (!environmentPath.isAbsolute(path)) return undefined;
+    const normalized = environmentPath.normalize(path);
+    const taskOutput = this.session !== undefined && this.agent !== undefined && (
+      isTaskOutputFilePath(normalized, environmentPath.join(this.session.sessionDir, 'agents', this.agent.agentId), environmentPath) ||
+      (this.agent.agentId === 'main' && isTaskOutputFilePath(normalized, this.session.sessionDir, environmentPath))
+    );
+    if (!taskOutput && !this.resultTruncation.isSpillFilePath(normalized)) return undefined;
+    return { fs: this.hostFs, path: normalized, environmentPath: { ...environmentPath, separator: environmentPath.sep, delimiter: environmentPath.delimiter }, pathClass: this.hostEnvironment.pathClass };
+  }
+
+  private localArtifactExecution(args: ReadInput, target: PlanFileTarget, planFile: boolean): ToolExecution {
+    const { path } = target;
+    return {
+      accesses: ToolAccesses.readFile(path),
+      description: `Reading ${args.path}`,
+      display: { kind: 'file_io', operation: 'read', path },
+      approvalRule: literalRulePattern(this.name, path),
+      matchesRule: (ruleArgs) => matchesPathRuleSubject(ruleArgs, path, {
+        cwd: target.environmentPath.dirname(path), pathClass: target.pathClass,
+      }),
+      execute: async () => {
+        if (planFile && (await this.planService?.resolveFile(path, 'read'))?.path !== path) {
+          return { isError: true, output: 'The active plan changed before execution. Retry the tool call.' };
+        }
+        return { ...await this.execution(environmentFileSource(target.fs, path), args, false), spillExempt: true };
+      },
+    };
   }
 
   private async attachmentExecution(args: ReadInput): Promise<ToolExecution> {

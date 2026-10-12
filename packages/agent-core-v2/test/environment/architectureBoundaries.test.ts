@@ -81,9 +81,14 @@ describe('environment architecture boundaries', () => {
       const contents = source(path);
       expect(contents).toContain('new EnvironmentWorkspaceView(');
       expect(contents).toMatch(/acquireOrWhenReady\(this\.environment|\.environment\.(acquire|acquireWhenReady|inspect)\(/);
-      expect(contents).not.toMatch(/@IHost(?:Environment|FileSystem|FsWatchService|ProcessService|TerminalService)/);
+      if (path !== 'agent/tools/os/read/readTool.ts') {
+        expect(contents).not.toMatch(/@IHost(?:Environment|FileSystem|FsWatchService|ProcessService|TerminalService)/);
+      }
     }
     const readTool = source('agent/tools/os/read/readTool.ts');
+    expect(readTool).toContain('this.localOutputTarget(args.path)');
+    expect(readTool).toContain('isTaskOutputFilePath(normalized, environmentPath.join(this.session.sessionDir');
+    expect(readTool).toContain('this.resultTruncation.isSpillFilePath(normalized)');
     expect(readTool).not.toContain('IAgentEnvironmentService | IHostFileSystem');
     expect(readTool).not.toContain("'acquire' in environment");
   });

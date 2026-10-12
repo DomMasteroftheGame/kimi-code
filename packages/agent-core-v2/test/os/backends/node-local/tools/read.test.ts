@@ -12,6 +12,8 @@ import {
   ReadInputSchema,
   TRANSCODE_MAX_BYTES,
 } from '#/agent/tools/os/read/read';
+import { makeSessionContext } from '#/session/sessionContext/sessionContext';
+import { makeAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { ReadTool } from '#/agent/tools/os/read/readTool';
 import { renderToolResultForModel } from '#/agent/contextMemory/toolResultRender';
 import { stubToolResultTruncationService } from '../../../../agent/toolResultTruncation/stubs';
@@ -236,6 +238,27 @@ async function connectingReadExecution(status?: 'connecting') {
 }
 
 describe('ReadTool', () => {
+  it('reads owned Windows UNC task output with native case-insensitive root semantics', async () => {
+    const remote = createSpiedFs('remote file');
+    const local = createSpiedFs('local output');
+    const environment = Object.assign(new FakeEnvironment({ environmentId: 'remote', generation: 'test' }, { capabilities: ['fs'] }), { fs: remote.fs });
+    const tool = new ReadTool(
+      stubAgentEnvironment(environment), PERMISSIVE_WORKSPACE,
+      { catalog: { getSkillRoots: () => [] } } as unknown as ISessionSkillCatalog,
+      stubToolResultTruncationService(), stubConfigService(),
+      stubProfileService({ image_in: true, video_in: true }),
+      { isToolActive: () => true } as unknown as IAgentToolPolicyService,
+      { resolve: () => ({}) } as unknown as IAgentToolRegistryService,
+      undefined, undefined, local.fs, { ...createTestEnv(), pathClass: 'win32' },
+      makeSessionContext({ sessionId: 'session', workspaceId: 'workspace', sessionDir: '//server/share/session', sessionScope: 'sessions/session', cwd: '/workspace' }),
+      makeAgentScopeContext({ agentId: 'main', agentScope: 'sessions/session/agents/main' }),
+    );
+    const result = await execute(tool, { path: '//SERVER/SHARE/SESSION/agents/MAIN/tasks/bash-native01/output.log' });
+    expect(result.isError ?? false).toBe(false);
+    expect(result.output).toContain('local output');
+    expect(remote.stat).not.toHaveBeenCalled();
+  });
+
   it('reads a 4621-line document in full when the requested character budget fits', async () => {
     const content = Array.from({ length: 4621 }, (_, index) =>
       `section ${String(index + 1)} ${'x'.repeat(55)}`,

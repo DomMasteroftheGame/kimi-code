@@ -290,7 +290,7 @@ describe('tool environment generation guard', () => {
 
     it(`${tool.name} rejects execution when the generation changes after a ready resolve`, async () => {
       const harness = readyHarness(tool.fs);
-      const resolved = tool.resolve(harness.service);
+      const resolved = await tool.resolve(harness.service);
 
       await harness.registration.remove();
       harness.registry.register(replacementReadyEnvironment());

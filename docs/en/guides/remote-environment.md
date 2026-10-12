@@ -6,6 +6,8 @@ A remote environment lets the agent's tools — reading and writing files, and r
 
 Kimi Code keeps the agent loop, model requests, credentials, approvals, and session state on your machine. The target environment only executes two groups of OS primitives: filesystem and process. A small executor process (`kimi exec-server`) runs on the target and serves those primitives over a single connection; everything else — including every LLM request — stays local.
 
+Plan files stay in the local session directory, including in remote sessions. `Read`, `Write`, and `Edit` address the current plan locally; saved plans remain readable after leaving plan mode. Task output is also retained locally and mirrored to the target when available. If that mirror fails, the returned local output path remains readable with `Read`.
+
 The security boundaries are fixed:
 
 - **API keys never leave your machine**: LLM API keys and OAuth tokens are never sent to the target, and the executor never makes model requests.

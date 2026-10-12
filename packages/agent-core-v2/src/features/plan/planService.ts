@@ -1,6 +1,7 @@
-import { createHash, randomUUID } from 'node:crypto';
+import * as posixPath from 'node:path/posix';
+import * as win32Path from 'node:path/win32';
 
-import { normalize } from 'pathe';
+import { createHash, randomUUID } from 'node:crypto';
 
 import { type IDisposable } from '#/_base/di/lifecycle';
 import { Service } from '#/_base/di/service';
@@ -10,7 +11,7 @@ import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory'
 import { IAgentReminderService } from '#/features/reminder/reminderService';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
 import { PlanModeInjection } from '#/features/plan/injection/planModeInjection';
-import { IAgentEnvironmentService } from '#/agent/environmentBinding/agentEnvironment';
+import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { IAgentToolApprovalService } from '#/agent/toolApproval/toolApproval';
@@ -25,8 +26,7 @@ import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { isHostFsNotFound } from '#/os/interface/hostFsErrors';
 import { IBlobStore } from '#/persistence/interface/blobStore';
-import { POSIX_ENVIRONMENT_PATH } from '#/environment/environmentDefaults';
-import { realpathExistingPrefix, type EnvironmentPath } from '#/environment/environment';
+import { realpathExistingPrefix } from '#/environment/environment';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { IEventDispatcher } from '#/state/eventDispatcher';
 import { AgentStatusUpdated } from '#/agent/usage/usageEvents';
@@ -35,6 +35,7 @@ import type { ToolFileAccess } from '#/tool/toolContract';
 import {
   IAgentPlanService,
   type PlanData,
+  type PlanFileTarget,
 } from './plan';
 import { ExitPlanModeReview } from './exitPlanModeReview';
 import {
@@ -45,12 +46,6 @@ import {
   PlanRevision,
 } from './planOps';
 
-interface PlanFileTarget {
-  readonly fs: IHostFileSystem;
-  readonly path: string;
-  readonly environmentPath: EnvironmentPath;
-}
-
 export class AgentPlanService extends Service implements IAgentPlanService {
   declare readonly _serviceBrand: undefined;
 
@@ -58,7 +53,7 @@ export class AgentPlanService extends Service implements IAgentPlanService {
 
   constructor(
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
-    @IAgentEnvironmentService private readonly environment: IAgentEnvironmentService,
+    @IHostEnvironment private readonly hostEnvironment: IHostEnvironment,
     @IHostFileSystem private readonly hostFs: IHostFileSystem,
     @IBlobStore private readonly blobs: IBlobStore,
     @IAgentReminderService reminder: IAgentReminderService,
@@ -249,12 +244,29 @@ export class AgentPlanService extends Service implements IAgentPlanService {
     };
   }
 
+  async resolveFile(path: string, operation: 'read' | 'write' = 'write'): Promise<PlanFileTarget | undefined> {
+    if (path.includes('\0')) return undefined;
+    const state = this.agentState.get(planKey);
+    if (state.active && state.id !== undefined) {
+      const target = this.planFileTarget(state.id);
+      if (target.environmentPath.isAbsolute(path) && await this.isPlanFilePath(target, path)) return target;
+    }
+    if (operation !== 'read') return undefined;
+    const target = this.planFileTarget('');
+    if (!target.environmentPath.isAbsolute(path)) return undefined;
+    const name = target.environmentPath.relative(target.environmentPath.dirname(target.path), path);
+    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*\.md$/i.test(name)) return undefined;
+    return this.planFileTarget(name.slice(0, -3));
+  }
+
   private planFileTarget(id: string): PlanFileTarget {
-    const directory = POSIX_ENVIRONMENT_PATH.join(this.sessionCtx.sessionDir, 'agents', this.agentCtx.agentId, 'plans');
+    const environmentPath = this.hostEnvironment.pathClass === 'win32' ? win32Path : posixPath;
+    const directory = environmentPath.join(this.sessionCtx.sessionDir, 'agents', this.agentCtx.agentId, 'plans');
     return {
       fs: this.hostFs,
-      environmentPath: POSIX_ENVIRONMENT_PATH,
-      path: POSIX_ENVIRONMENT_PATH.join(directory, `${id}.md`),
+      environmentPath: { ...environmentPath, separator: environmentPath.sep, delimiter: environmentPath.delimiter },
+      pathClass: this.hostEnvironment.pathClass,
+      path: environmentPath.join(directory, `${id}.md`),
     };
   }
 
@@ -276,6 +288,10 @@ export class AgentPlanService extends Service implements IAgentPlanService {
   }
 
   private async isPlanFilePath(target: PlanFileTarget, path: string): Promise<boolean> {
+    const normalize = (value: string): string => {
+      const normalized = (target.pathClass === 'win32' ? win32Path : posixPath).normalize(value);
+      return target.pathClass === 'win32' ? normalized.toLowerCase() : normalized;
+    };
     if (normalize(path) === normalize(target.path)) return true;
     const [accessReal, planReal] = await Promise.all([
       canonicalizeExistingPrefix(target, path),
