@@ -47,6 +47,7 @@ export interface ChoicePickerOptions {
   readonly initialValue?: string;
   /** When true, typed characters filter the list (fuzzy) and a search line is shown. */
   readonly searchable?: boolean;
+  readonly spaceSelect?: boolean;
   /** Items per page. Lists longer than this paginate. */
   readonly pageSize?: number;
   readonly onSelect: (value: string) => void;
@@ -119,10 +120,12 @@ export class ChoicePickerComponent extends Container implements Focusable {
       this.list.pageDown();
       return;
     }
-    // Enter always selects. Space selects too — but only when the list is not
-    // searchable; in a searchable list a space must reach the query instead.
+    // Space confirmation is opt-out; searchable lists always route it to the query.
     const isSpace = matchesKey(data, Key.space) || printableChar(data) === ' ';
-    if (matchesKey(data, Key.enter) || (isSpace && this.opts.searchable !== true)) {
+    if (
+      matchesKey(data, Key.enter) ||
+      (isSpace && this.opts.searchable !== true && this.opts.spaceSelect !== false)
+    ) {
       const chosen = this.list.selected();
       if (chosen !== undefined) this.opts.onSelect(chosen.value);
       return;

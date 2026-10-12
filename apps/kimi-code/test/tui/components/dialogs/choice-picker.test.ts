@@ -150,6 +150,21 @@ describe('ChoicePickerComponent', () => {
     expect(onSelect).toHaveBeenCalledWith('a');
   });
 
+  it.each([' ', '\u001B[32u'])('requires Enter when spaceSelect is disabled (%j)', (space) => {
+    const onSelect = vi.fn();
+    const picker = new ChoicePickerComponent({
+      title: 'Confirm migration',
+      options: [{ value: 'switch', label: 'Switch model' }],
+      spaceSelect: false,
+      onSelect,
+      onCancel: vi.fn(),
+    });
+    picker.handleInput(space);
+    expect(onSelect).not.toHaveBeenCalled();
+    picker.handleInput('\r');
+    expect(onSelect).toHaveBeenCalledWith('switch');
+  });
+
   it('renders the selected option description in descriptionTone, others in textMuted', () => {
     const options: ChoiceOption[] = [
       { value: 'none', label: 'No attachment', description: 'Text feedback only' },

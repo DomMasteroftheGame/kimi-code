@@ -47,16 +47,62 @@ function findModelMigration(host: SlashCommandHost): ModelMigration | undefined 
   };
 }
 
+function canShowModelMigrationPrompt(host: SlashCommandHost): boolean {
+  return (
+    host.state.activeDialog === null &&
+    !host.state.editorReplacementMounted &&
+    !host.state.externalEditorRunning &&
+    !host.state.appState.isCompacting &&
+    !host.state.appState.isReplaying &&
+    host.state.appState.streamingPhase === 'idle' &&
+    host.state.queuedMessages.length === 0 &&
+    !host.state.queuedMessageDispatchPending &&
+    host.state.editor.getText().length === 0
+  );
+}
+
+export class ModelMigrationController {
+  private pending = false;
+  private scheduled = false;
+
+  constructor(private readonly host: SlashCommandHost & { readonly aborted: boolean }) {}
+
+  request(): void {
+    this.pending = true;
+    this.retry();
+  }
+
+  retry(): void {
+    if (!this.pending || this.scheduled) return;
+    this.scheduled = true;
+    // Defer past editor submission and its lazy-session dispatch continuations.
+    queueMicrotask(() => {
+      void this.host.waitForLazyCreation()
+        .then(() => {
+          setImmediate(() => {
+            this.scheduled = false;
+            if (
+              this.host.aborted ||
+              !canShowModelMigrationPrompt(this.host) ||
+              this.host.state.appState.model.length === 0
+            ) {
+              return;
+            }
+            this.pending = false;
+            void maybeShowModelMigrationPrompt(this.host);
+          });
+        })
+        .catch(() => {
+          this.scheduled = false;
+          this.host.showError('Failed to check model migration.');
+        });
+    });
+  }
+}
+
 export async function maybeShowModelMigrationPrompt(host: SlashCommandHost): Promise<void> {
   const migration = findModelMigration(host);
-  if (
-    migration === undefined ||
-    host.state.activeDialog !== null ||
-    host.state.editorReplacementMounted ||
-    host.state.appState.streamingPhase !== 'idle'
-  ) {
-    return;
-  }
+  if (migration === undefined || !canShowModelMigrationPrompt(host)) return;
 
   await new Promise<void>((resolve) => {
     let settled = false;
@@ -72,7 +118,12 @@ export async function maybeShowModelMigrationPrompt(host: SlashCommandHost): Pro
             return;
           }
           const effort = defaultThinkingEffortFor(effectiveModelForHost(host, target));
-          const switched = await performModelSwitch(host, migration.toAlias, effort, true);
+          const switched = await performModelSwitch(
+            host,
+            migration.toAlias,
+            effort,
+            'model-and-effort',
+          );
           if (!switched) {
             resolve();
             return;
@@ -96,6 +147,7 @@ export async function maybeShowModelMigrationPrompt(host: SlashCommandHost): Pro
         ],
         currentValue: 'keep',
         initialValue: 'switch',
+        spaceSelect: false,
         onSelect: (value) => finish(value === 'switch'),
         onCancel: () => {
           if (settled) return;

@@ -130,7 +130,7 @@ import { AuthFlowController } from './controllers/auth-flow';
 import { BtwPanelController } from './controllers/btw-panel';
 import { ClipboardImageHintController } from './controllers/clipboard-image-hint';
 import { EditorKeyboardController } from './controllers/editor-keyboard';
-import { maybeShowModelMigrationPrompt } from './controllers/model-migration';
+import { ModelMigrationController } from './controllers/model-migration';
 import { SessionEventHandler } from './controllers/session-event-handler';
 import { SessionReplayRenderer } from './controllers/session-replay';
 import { StagingLeaseTracker, type StagingLease } from './controllers/staging-leases';
@@ -402,6 +402,7 @@ export class KimiTUI {
   readonly tasksBrowserController: TasksBrowserController;
   readonly surveyController: SurveyController;
   readonly editorKeyboard: EditorKeyboardController;
+  readonly modelMigration: ModelMigrationController;
 
   /** Timer that auto-clears the one-shot "moved to background" footer hint. */
   private detachHintClearTimer: ReturnType<typeof setTimeout> | undefined;
@@ -516,6 +517,7 @@ export class KimiTUI {
       accessToken: () => this.harness.auth.getCachedAccessToken(),
       telemetryDisabled: () => isTelemetryDisabledByEnv() || this.telemetryDisabled,
     });
+    this.modelMigration = new ModelMigrationController(this);
     this.editorKeyboard = new EditorKeyboardController(this, this.imageStore);
     this.editorKeyboard.install();
     this.buildLayout();
@@ -857,7 +859,10 @@ export class KimiTUI {
     // stderr for non-interactive runs.
     void this.showConfigWarningsIfAny();
     if (this.state.startupState === 'picker') {
-      void this.bootstrapFromPicker().then(() => maybeShowModelMigrationPrompt(this));
+      void this.bootstrapFromPicker();
+      void this.backgroundRefreshPromise?.then(() => {
+        this.modelMigration.request();
+      });
       return;
     }
     if (shouldReplayHistory) {
@@ -882,7 +887,9 @@ export class KimiTUI {
     }
     void this.refreshSkillCommands(this.session);
     void this.refreshPluginCommands(this.session);
-    void this.backgroundRefreshPromise?.then(() => maybeShowModelMigrationPrompt(this));
+    void this.backgroundRefreshPromise?.then(() => {
+      this.modelMigration.request();
+    });
   }
 
   private async showSessionWarnings(session: Session): Promise<void> {
@@ -2324,6 +2331,7 @@ export class KimiTUI {
 
   setExternalEditorRunning(running: boolean): void {
     this.state.externalEditorRunning = running;
+    if (!running) this.modelMigration.retry();
   }
 
   setTasksBrowser(value: TUIState['tasksBrowser']): void {
@@ -2380,6 +2388,7 @@ export class KimiTUI {
       this.sessionEventHandler.retryQueuedGoalPromotion();
     }
     if (additionalDirsChanged) this.setupAutocomplete();
+    this.modelMigration.retry();
     this.state.ui.requestRender();
   }
 
@@ -4021,6 +4030,7 @@ export class KimiTUI {
     this.state.editorContainer.clear();
     this.state.editorContainer.addChild(this.state.editor);
     this.state.ui.setFocus(this.state.editor);
+    this.modelMigration.retry();
     // Differential render only: closing a tall panel leaves the editor a few
     // rows above the bottom (blank tail) until the next append, but avoids a
     // destructive full redraw on every dialog close.

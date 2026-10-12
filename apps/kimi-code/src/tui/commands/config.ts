@@ -405,7 +405,7 @@ export async function performModelSwitch(
   host: SlashCommandHost,
   alias: string,
   effort: ThinkingEffort,
-  persist: boolean,
+  persist: boolean | 'model-and-effort',
 ): Promise<boolean> {
   let session = host.session;
   if (session === undefined) {
@@ -479,7 +479,7 @@ export async function performModelSwitch(
         host,
         effectiveAlias,
         effectiveEffort,
-        effectiveEffortChanged,
+        effectiveEffortChanged || persist === 'model-and-effort',
       );
     } catch (error) {
       const msg = formatErrorMessage(error);
@@ -510,7 +510,7 @@ async function persistModelSelection(
   host: SlashCommandHost,
   alias: string,
   effort: ThinkingEffort,
-  effortChanged: boolean,
+  persistEffort: boolean,
 ): Promise<boolean> {
   const config = await host.harness.getConfig({ reload: true });
   const model = host.state.appState.availableModels[alias];
@@ -518,13 +518,13 @@ async function persistModelSelection(
     effort,
     model === undefined ? undefined : effectiveModelForHost(host, model),
   );
-  // Re-confirming the effort shown when the picker opened is not an explicit
-  // choice — persist the model but leave the stored effort preference alone.
-  const patch = effortChanged ? full : { enabled: full.enabled };
+  // Ordinary /model confirmation preserves the stored effort unless it changed;
+  // migration acceptance explicitly persists the target effort.
+  const patch = persistEffort ? full : { enabled: full.enabled };
   if (
     config.defaultModel === alias &&
     config.thinking?.enabled === patch.enabled &&
-    (!effortChanged || config.thinking?.effort === patch.effort)
+    (!persistEffort || config.thinking?.effort === patch.effort)
   ) {
     return false;
   }
