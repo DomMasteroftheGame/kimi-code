@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -13,6 +13,7 @@ import { promptPlatformSelection, promptLogoutProviderSelection } from '#/tui/co
 import { BannerComponent } from '#/tui/components/chrome/banner';
 import { WelcomeComponent } from '#/tui/components/chrome/welcome';
 import { KimiTUI, type KimiTUIStartupInput, type TUIState } from '#/tui/kimi-tui';
+import { maybeShowModelMigrationPrompt } from '#/tui/controllers/model-migration';
 import { REPLAY_FETCH_TURN_LIMIT } from '#/tui/utils/message-replay';
 import { copyTextToClipboard } from '#/utils/clipboard/clipboard-text';
 import { quoteShellArg } from '#/utils/shell-quote';
@@ -1894,6 +1895,142 @@ describe('KimiTUI startup', () => {
 
     expect(showStatus).toHaveBeenCalledTimes(1);
     expect(showStatus).toHaveBeenCalledWith("New Models · +2 models.");
+  });
+
+  function installMigrationModels(driver: StartupDriver): void {
+    driver.state.appState.model = 'acme/current';
+    driver.state.appState.thinkingEffort = 'off';
+    driver.state.appState.availableProviders = {
+      acme: { type: 'openai' },
+    };
+    driver.state.appState.availableModels = {
+      'acme/current': {
+        provider: 'acme',
+        model: 'current',
+        maxContextSize: 100,
+        capabilities: ['tool_use'],
+        upgrade: {
+          model: 'acme/next',
+          migrationMarkdown: 'Use {model_from} to {model_to}',
+          retirementAt: undefined,
+        },
+      },
+      'acme/next': {
+        provider: 'acme',
+        model: 'next',
+        maxContextSize: 100,
+        capabilities: ['tool_use', 'thinking'],
+        supportEfforts: ['low', 'high'],
+        defaultEffort: 'high',
+      },
+    };
+  }
+
+  it('accepts a model migration and applies the target default effort', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'kimi-model-migration-'));
+    vi.stubEnv('KIMI_CODE_HOME', dir);
+    const session = makeSession({
+      getStatus: vi.fn(async () => ({
+        model: 'acme/next',
+        thinkingEffort: 'high',
+        permission: 'manual',
+        planMode: false,
+        contextTokens: 10,
+        maxContextTokens: 100,
+        contextUsage: 0.1,
+      })),
+    });
+    const setConfig = vi.fn(async () => ({}));
+    const harness = makeHarness(session, { setConfig });
+    const driver = makeDriver(harness, makeStartupInput());
+    await driver.setSession(session);
+    installMigrationModels(driver);
+
+    try {
+      const prompt = maybeShowModelMigrationPrompt(driver as any);
+      const picker = driver.state.editorContainer.children[0] as {
+        handleInput(data: string): void;
+        render(width: number): string[];
+      };
+      expect(picker.render(100).join('\n')).toContain('Use current to next');
+      picker.handleInput('\r');
+      await prompt;
+
+      expect(session.setModel).toHaveBeenCalledWith('acme/next');
+      expect(session.setThinking).toHaveBeenCalledWith('high');
+      expect(setConfig).toHaveBeenCalledWith({
+        defaultModel: 'acme/next',
+        thinking: { enabled: true, effort: 'high' },
+      });
+      expect(driver.state.appState.modelMigrations).toEqual({ 'acme/current': 'next' });
+      expect(readFileSync(join(dir, 'tui.toml'), 'utf-8')).toContain('"acme/current" = "next"');
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the current model and acknowledges the migration', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'kimi-model-migration-'));
+    vi.stubEnv('KIMI_CODE_HOME', dir);
+    const session = makeSession();
+    const driver = makeDriver(makeHarness(session), makeStartupInput());
+    await driver.setSession(session);
+    installMigrationModels(driver);
+
+    try {
+      const prompt = maybeShowModelMigrationPrompt(driver as any);
+      const picker = driver.state.editorContainer.children[0] as { handleInput(data: string): void };
+      picker.handleInput('\u001B[B');
+      picker.handleInput('\r');
+      await prompt;
+
+      expect(session.setModel).not.toHaveBeenCalled();
+      expect(session.setThinking).not.toHaveBeenCalled();
+      expect(driver.state.appState.model).toBe('acme/current');
+      expect(driver.state.appState.modelMigrations).toEqual({ 'acme/current': 'next' });
+      expect(readFileSync(join(dir, 'tui.toml'), 'utf-8')).toContain('"acme/current" = "next"');
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('cancels a model migration without acknowledging it', async () => {
+    const session = makeSession();
+    const driver = makeDriver(makeHarness(session), makeStartupInput());
+    await driver.setSession(session);
+    installMigrationModels(driver);
+
+    const prompt = maybeShowModelMigrationPrompt(driver as any);
+    const picker = driver.state.editorContainer.children[0] as { handleInput(data: string): void };
+    picker.handleInput('\u001B');
+    await prompt;
+
+    expect(session.setModel).not.toHaveBeenCalled();
+    expect(driver.state.editorReplacementMounted).toBe(false);
+    expect(driver.state.appState.modelMigrations).toEqual({});
+  });
+
+  it('skips acknowledged migrations and targets outside the current provider', async () => {
+    const driver = makeDriver(makeHarness(), makeStartupInput());
+    installMigrationModels(driver);
+    driver.state.appState.modelMigrations = { 'acme/current': 'next' };
+
+    await maybeShowModelMigrationPrompt(driver as any);
+    expect(driver.state.editorReplacementMounted).toBe(false);
+
+    driver.state.appState.modelMigrations = {};
+    driver.state.appState.availableModels = {
+      'acme/current': driver.state.appState.availableModels['acme/current']!,
+      'other/next': {
+        provider: 'other',
+        model: 'next',
+        maxContextSize: 100,
+      },
+    };
+    await maybeShowModelMigrationPrompt(driver as any);
+    expect(driver.state.editorReplacementMounted).toBe(false);
   });
 
   it("stages provider-refresh removals and persists one atomic write on atomic-capable harnesses", async () => {

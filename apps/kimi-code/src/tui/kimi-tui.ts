@@ -130,6 +130,7 @@ import { AuthFlowController } from './controllers/auth-flow';
 import { BtwPanelController } from './controllers/btw-panel';
 import { ClipboardImageHintController } from './controllers/clipboard-image-hint';
 import { EditorKeyboardController } from './controllers/editor-keyboard';
+import { maybeShowModelMigrationPrompt } from './controllers/model-migration';
 import { SessionEventHandler } from './controllers/session-event-handler';
 import { SessionReplayRenderer } from './controllers/session-replay';
 import { StagingLeaseTracker, type StagingLease } from './controllers/staging-leases';
@@ -298,6 +299,7 @@ function createInitialAppState(input: KimiTUIStartupInput): AppState {
     disableFeedbackSurvey: input.tuiConfig.disableFeedbackSurvey,
     notifications: input.tuiConfig.notifications,
     upgrade: input.tuiConfig.upgrade,
+    modelMigrations: input.tuiConfig.notice?.modelMigrations ?? {},
     statusLine: input.tuiConfig.statusLine,
     markdown: input.tuiConfig.markdown,
     availableModels: {},
@@ -855,7 +857,7 @@ export class KimiTUI {
     // stderr for non-interactive runs.
     void this.showConfigWarningsIfAny();
     if (this.state.startupState === 'picker') {
-      void this.bootstrapFromPicker();
+      void this.bootstrapFromPicker().then(() => maybeShowModelMigrationPrompt(this));
       return;
     }
     if (shouldReplayHistory) {
@@ -880,6 +882,7 @@ export class KimiTUI {
     }
     void this.refreshSkillCommands(this.session);
     void this.refreshPluginCommands(this.session);
+    void this.backgroundRefreshPromise?.then(() => maybeShowModelMigrationPrompt(this));
   }
 
   private async showSessionWarnings(session: Session): Promise<void> {

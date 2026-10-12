@@ -212,6 +212,23 @@ command = "   "
 
     expect((await loadTuiConfig(filePath)).theme).toBe(theme);
   });
+
+  it('round-trips model migration acknowledgements', async () => {
+    await saveTuiConfig(
+      {
+        ...DEFAULT_TUI_CONFIG,
+        notice: { modelMigrations: { 'acme/current': 'next' } },
+      },
+      filePath,
+    );
+
+    const text = readFileSync(filePath, 'utf-8');
+    expect(text).toContain('[notice.model_migrations]');
+    expect(text).toContain('"acme/current" = "next"');
+    expect((await loadTuiConfig(filePath)).notice?.modelMigrations).toEqual({
+      'acme/current': 'next',
+    });
+  });
 });
 
 describe('TUI config status_line', () => {

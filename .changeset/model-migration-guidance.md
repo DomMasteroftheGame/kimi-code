@@ -2,4 +2,4 @@
 "@moonshot-ai/kimi-code": patch
 ---
 
-Expose custom-registry model upgrade metadata in model configuration and the `/models` API so clients can guide users through model migration.
+Expose custom-registry model upgrade metadata in model configuration and prompt for migration in the TUI.

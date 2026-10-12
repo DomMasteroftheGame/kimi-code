@@ -69,6 +69,7 @@ export function currentTuiConfig(host: Pick<SlashCommandHost, 'state'>): TuiConf
       host.state.appState.disableFeedbackSurvey ?? DEFAULT_TUI_CONFIG.disableFeedbackSurvey,
     notifications: host.state.appState.notifications,
     upgrade: host.state.appState.upgrade,
+    notice: { modelMigrations: host.state.appState.modelMigrations ?? {} },
     statusLine: host.state.appState.statusLine ?? DEFAULT_TUI_CONFIG.statusLine,
     markdown: host.state.appState.markdown ?? DEFAULT_MARKDOWN_CONFIG,
   };
@@ -400,12 +401,12 @@ export function showModelPicker(host: SlashCommandHost, selectedValue: string = 
   );
 }
 
-async function performModelSwitch(
+export async function performModelSwitch(
   host: SlashCommandHost,
   alias: string,
   effort: ThinkingEffort,
   persist: boolean,
-): Promise<void> {
+): Promise<boolean> {
   let session = host.session;
   if (session === undefined) {
     // A first prompt may still be inside lazy creation: wait it out so the
@@ -416,7 +417,7 @@ async function performModelSwitch(
   }
   if (host.state.appState.streamingPhase !== 'idle') {
     host.showError('Cannot switch models while streaming — press Esc or Ctrl-C first.');
-    return;
+    return false;
   }
 
   const prevModel = host.state.appState.model;
@@ -444,7 +445,7 @@ async function performModelSwitch(
   } catch (error) {
     const msg = formatErrorMessage(error);
     host.showError(`Failed to switch model: ${msg}`);
-    return;
+    return false;
   }
 
   if (session === undefined) {
@@ -483,7 +484,7 @@ async function performModelSwitch(
     } catch (error) {
       const msg = formatErrorMessage(error);
       host.showError(`Switched to ${displayName}, but failed to save default: ${msg}`);
-      return;
+      return false;
     }
   }
 
@@ -502,6 +503,7 @@ async function performModelSwitch(
     status = `Already using ${displayName} with thinking ${effectiveEffort}.`;
   }
   host.showStatus(status, 'success');
+  return true;
 }
 
 async function persistModelSelection(
