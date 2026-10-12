@@ -1,7 +1,11 @@
+import type { ThinkingEffort } from '@moonshot-ai/kimi-code-sdk';
+
 import { ChoicePickerComponent } from '../components/dialogs/choice-picker';
 import {
   defaultThinkingEffortFor,
   modelDisplayName,
+  segmentsFor,
+  thinkingAvailability,
 } from '../components/dialogs/model-selector';
 import { currentTuiConfig, effectiveModelForHost, performModelSwitch } from '../commands/config';
 import type { SlashCommandHost } from '../commands/dispatch';
@@ -13,6 +17,8 @@ interface ModelMigration {
   readonly toAlias: string;
   readonly toModel: string;
   readonly displayName: string;
+  readonly effort: ThinkingEffort;
+  readonly effortHint?: string;
   readonly migrationMarkdown: string;
   readonly retirementAt?: string | null;
 }
@@ -30,13 +36,25 @@ function findModelMigration(host: SlashCommandHost): ModelMigration | undefined 
   if (target === undefined) return;
   const [toAlias, to] = target;
   if (modelMigrations[fromAlias] === to.model) return;
+  const targetModel = effectiveModelForHost(host, to);
+  const liveEffort = host.state.appState.thinkingEffort;
+  // The live effort is a user choice only when the source model can think at
+  // all; keep it when the target supports it, else use the target's default.
+  const effort =
+    thinkingAvailability(effectiveModelForHost(host, from)) !== 'unsupported' &&
+    segmentsFor(targetModel).includes(liveEffort)
+      ? liveEffort
+      : defaultThinkingEffortFor(targetModel);
   const migrationMarkdown = upgrade.migrationMarkdown.trim();
   return {
     fromAlias,
     fromModel: from.model,
     toAlias,
     toModel: to.model,
-    displayName: modelDisplayName(toAlias, effectiveModelForHost(host, to)),
+    displayName: modelDisplayName(toAlias, targetModel),
+    effort,
+    effortHint:
+      thinkingAvailability(targetModel) === 'unsupported' ? undefined : `thinking ${effort}`,
     migrationMarkdown:
       migrationMarkdown.length > 0
         ? migrationMarkdown
@@ -118,16 +136,14 @@ export async function maybeShowModelMigrationPrompt(
       host.restoreEditor();
       void (async () => {
         if (switchModel) {
-          const target = host.state.appState.availableModels[migration.toAlias];
-          if (target === undefined) {
+          if (host.state.appState.availableModels[migration.toAlias] === undefined) {
             resolve();
             return;
           }
-          const effort = defaultThinkingEffortFor(effectiveModelForHost(host, target));
           const switched = await performModelSwitch(
             host,
             migration.toAlias,
-            effort,
+            migration.effort,
             'model-and-effort',
           );
           if (!switched) {
@@ -148,7 +164,11 @@ export async function maybeShowModelMigrationPrompt(
         title: 'Model migration available',
         noticeMarkdown: migrationNotice(migration),
         options: [
-          { value: 'switch', label: `Switch to ${migration.displayName}` },
+          {
+            value: 'switch',
+            label: `Switch to ${migration.displayName}`,
+            description: migration.effortHint,
+          },
           { value: 'keep', label: 'Keep current model' },
         ],
         currentValue: 'keep',

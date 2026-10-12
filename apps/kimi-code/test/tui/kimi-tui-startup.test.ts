@@ -1989,6 +1989,61 @@ describe('KimiTUI startup', () => {
     }
   });
 
+  it.each([
+    ['low', ['low', 'high'], 'low'],
+    ['off', ['low', 'high'], 'off'],
+    ['max', ['max'], 'high'],
+  ] as const)('resolves a live %s effort on a thinking source to the migration effort', async (liveEffort, sourceEfforts, expected) => {
+    const dir = mkdtempSync(join(tmpdir(), 'kimi-model-migration-'));
+    vi.stubEnv('KIMI_CODE_HOME', dir);
+    const session = makeSession({
+      getStatus: vi.fn(async () => ({
+        model: 'acme/next',
+        thinkingEffort: expected,
+        permission: 'manual',
+        planMode: false,
+        contextTokens: 10,
+        maxContextTokens: 100,
+        contextUsage: 0.1,
+      })),
+    });
+    const setConfig = vi.fn(async () => ({}));
+    const harness = makeHarness(session, {
+      setConfig,
+      getConfig: vi.fn(async () => ({ defaultModel: 'acme/current', thinking: { enabled: true } })),
+    });
+    const driver = makeDriver(harness, makeStartupInput());
+    await driver.setSession(session);
+    installMigrationModels(driver);
+    Object.assign(driver.state.appState.availableModels['acme/current']!, {
+      capabilities: ['tool_use', 'thinking'],
+      supportEfforts: [...sourceEfforts],
+    });
+    driver.state.appState.thinkingEffort = liveEffort;
+
+    try {
+      const prompt = maybeShowModelMigrationPrompt(driver as any);
+      const picker = driver.state.editorContainer.children[0] as ChoicePickerComponent;
+      expect(picker.render(100).join('\n')).toContain(`thinking ${expected}`);
+      picker.handleInput('\r');
+      await prompt;
+
+      expect(session.setModel).toHaveBeenCalledWith('acme/next');
+      if (expected === liveEffort) {
+        expect(session.setThinking).not.toHaveBeenCalled();
+      } else {
+        expect(session.setThinking).toHaveBeenCalledWith(expected);
+      }
+      expect(setConfig).toHaveBeenCalledWith({
+        defaultModel: 'acme/next',
+        thinking: expected === 'off' ? { enabled: false } : { enabled: true, effort: expected },
+      });
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it.each(['draft', 'streaming', 'dialog', 'compaction', 'replay', 'external-editor', 'shutdown'])('defers the startup migration during %s', async (blockedBy) => {
     const session = makeSession();
     const setConfig = vi.fn();
