@@ -572,6 +572,7 @@ describe('KimiTUI message flow', () => {
       thinking: undefined,
       permission: 'manual',
       planMode: undefined,
+      metadata: { source: 'cli' },
     });
     expect(driver.getCurrentSessionId()).toBe('ses-lazy');
   });
@@ -2673,6 +2674,7 @@ command = "vim"
         thinking: 'off',
         permission: 'manual',
         planMode: true,
+        metadata: { source: 'cli' },
       });
     });
     expect(session.setPlanMode).not.toHaveBeenCalled();
