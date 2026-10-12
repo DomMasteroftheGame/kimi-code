@@ -403,6 +403,7 @@ export class KimiTUI {
   readonly surveyController: SurveyController;
   readonly editorKeyboard: EditorKeyboardController;
   readonly modelMigration: ModelMigrationController;
+  private editorReplacementOnDisplaced: (() => void) | undefined;
 
   /** Timer that auto-clears the one-shot "moved to background" footer hint. */
   private detachHintClearTimer: ReturnType<typeof setTimeout> | undefined;
@@ -4016,20 +4017,26 @@ export class KimiTUI {
   // Dialogs / Selectors
   // =========================================================================
 
-  mountEditorReplacement(panel: Component & Focusable): void {
+  mountEditorReplacement(panel: Component & Focusable, onDisplaced?: () => void): void {
+    const previousOnDisplaced = this.editorReplacementOnDisplaced;
+    this.editorReplacementOnDisplaced = onDisplaced;
     this.surveyController.notifyDisplaced();
     this.state.editorReplacementMounted = true;
     this.state.editorContainer.clear();
     this.state.editorContainer.addChild(panel);
     this.state.ui.setFocus(panel);
     this.state.ui.requestRender();
+    previousOnDisplaced?.();
   }
 
   restoreEditor(): void {
+    const onDisplaced = this.editorReplacementOnDisplaced;
+    this.editorReplacementOnDisplaced = undefined;
     this.state.editorReplacementMounted = false;
     this.state.editorContainer.clear();
     this.state.editorContainer.addChild(this.state.editor);
     this.state.ui.setFocus(this.state.editor);
+    onDisplaced?.();
     this.modelMigration.retry();
     // Differential render only: closing a tall panel leaves the editor a few
     // rows above the bottom (blank tail) until the next append, but avoids a

@@ -38,7 +38,7 @@ Two paths when adding:
 
   A registry model may also declare an `upgrade` object. `model` selects the replacement model in the same provider, `migration_markdown` supplies the explanation shown during migration, and `retirement_at` is an optional RFC3339 timestamp or `null`. The field is stored on the corresponding model alias and returned by `GET /api/v1/models`, so clients can recover migration guidance whenever they reload the catalog. Refreshing syncs or removes this metadata without changing the default model.
 
-  On startup, the TUI prompts when the current model has a valid upgrade target, including after choosing a session to resume. The prompt waits until the editor is empty and no turn or dialog is active. Confirm with `Enter`; `Space` does not accept a migration. Accepting switches the model and saves the target's default effort; keeping the current model records the choice so that migration is not shown again.
+  On startup, the TUI prompts when the current model has a valid upgrade target, including after choosing a session to resume. The explanation is rendered as Markdown. The prompt waits until the editor is empty and no turn or dialog is active; if an approval or question interrupts it, it returns when the editor is idle again. Confirm with `Enter`; `Space` does not accept a migration. Accepting switches the model and saves the target's default effort; keeping the current model records the choice so that migration is not shown again.
 
   These fields are a Kimi registry extension, not part of the models.dev schema:
 

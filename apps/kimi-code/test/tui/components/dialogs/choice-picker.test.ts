@@ -1,3 +1,7 @@
+import { stripVTControlCharacters } from 'node:util';
+
+import { visibleWidth } from '@moonshot-ai/pi-tui';
+import chalk from 'chalk';
 import { describe, expect, it, vi } from 'vitest';
 
 import { ChoicePickerComponent, type ChoiceOption } from '#/tui/components/dialogs/choice-picker';
@@ -7,7 +11,7 @@ import { SettingsSelectorComponent } from '#/tui/components/dialogs/settings-sel
 import { ThemeSelectorComponent } from '#/tui/components/dialogs/theme-selector';
 import { UpdatePreferenceSelectorComponent } from '#/tui/components/dialogs/update-preference-selector';
 import { currentTheme } from '#/tui/theme';
-import { darkColors } from '#/tui/theme/colors';
+import { darkColors, lightColors } from '#/tui/theme/colors';
 
 const ANSI_SGR = /\[[0-9;]*m/g;
 
@@ -16,6 +20,64 @@ function strip(text: string): string {
 }
 
 describe('ChoicePickerComponent', () => {
+  it('keeps ordinary notices as plain text', () => {
+    const picker = new ChoicePickerComponent({
+      title: 'Pick one',
+      notice: '**Plain notice**',
+      options: [{ value: 'keep', label: 'Keep current' }],
+      onSelect: vi.fn(),
+      onCancel: vi.fn(),
+    });
+
+    expect(picker.render(100).map(strip)).toContain(' **Plain notice**');
+  });
+
+  it.each([24, 100])('renders Markdown notices and preserves paragraphs at width %s', (width) => {
+    const picker = new ChoicePickerComponent({
+      title: 'Migration',
+      noticeMarkdown: '### Upgrade\n\nUse **next** model.\n\n- Faster replies\n- [Details](https://example.com/upgrade)',
+      options: [{ value: 'keep', label: 'Keep current' }],
+      onSelect: vi.fn(),
+      onCancel: vi.fn(),
+    });
+
+    const rendered = picker.render(width);
+    const lines = rendered.map(stripVTControlCharacters);
+    const output = lines.join('\n');
+    expect(output).toContain(' Upgrade');
+    expect(output).toContain(' Use next model.');
+    expect(output).toContain('Faster replies');
+    expect(output).toContain('Details');
+    expect(output).not.toContain('###');
+    expect(output).not.toContain('**');
+    expect(output).not.toContain('[Details]');
+    const paragraph = lines.findIndex((line) => line.includes('Use next model.'));
+    expect(lines[paragraph - 1]?.trim()).toBe('');
+    expect(lines[paragraph + 1]?.trim()).toBe('');
+    expect(rendered.every((line) => visibleWidth(line) <= width)).toBe(true);
+  });
+
+  it('repaints Markdown notices with the current palette on the next render', () => {
+    const palette = currentTheme.palette;
+    const level = chalk.level;
+    chalk.level = 3;
+    const picker = new ChoicePickerComponent({
+      title: 'Migration', noticeMarkdown: '### Upgrade', options: [],
+      onSelect: vi.fn(), onCancel: vi.fn(),
+    });
+    try {
+      currentTheme.setPalette(darkColors);
+      const before = picker.render(100).find((line) => strip(line).includes('Upgrade'));
+      currentTheme.setPalette(lightColors);
+      const after = picker.render(100).find((line) => strip(line).includes('Upgrade'));
+      expect(after).not.toBe(before);
+      expect(strip(after!)).toBe(strip(before!));
+    } finally {
+      currentTheme.setPalette(palette);
+      chalk.level = level;
+    }
+  });
+
   it('uses the model-dialog header vocabulary (capitalized keys, "type to search")', () => {
     const picker = new ChoicePickerComponent({
       title: 'Add provider',

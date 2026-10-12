@@ -89,7 +89,9 @@ export class ModelMigrationController {
               return;
             }
             this.pending = false;
-            void maybeShowModelMigrationPrompt(this.host);
+            void maybeShowModelMigrationPrompt(this.host, () => {
+              this.request();
+            });
           });
         })
         .catch(() => {
@@ -100,7 +102,10 @@ export class ModelMigrationController {
   }
 }
 
-export async function maybeShowModelMigrationPrompt(host: SlashCommandHost): Promise<void> {
+export async function maybeShowModelMigrationPrompt(
+  host: SlashCommandHost,
+  onDisplaced?: () => void,
+): Promise<void> {
   const migration = findModelMigration(host);
   if (migration === undefined || !canShowModelMigrationPrompt(host)) return;
 
@@ -140,7 +145,7 @@ export async function maybeShowModelMigrationPrompt(host: SlashCommandHost): Pro
     host.mountEditorReplacement(
       new ChoicePickerComponent({
         title: 'Model migration available',
-        notice: migrationNotice(migration),
+        noticeMarkdown: migrationNotice(migration),
         options: [
           { value: 'switch', label: `Switch to ${migration.displayName}` },
           { value: 'keep', label: 'Keep current model' },
@@ -156,6 +161,12 @@ export async function maybeShowModelMigrationPrompt(host: SlashCommandHost): Pro
           resolve();
         },
       }),
+      () => {
+        if (settled) return;
+        settled = true;
+        onDisplaced?.();
+        resolve();
+      },
     );
   });
 }

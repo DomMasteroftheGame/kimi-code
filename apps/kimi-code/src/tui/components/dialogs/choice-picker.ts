@@ -18,6 +18,9 @@ import {
 } from '@moonshot-ai/pi-tui';
 import { CURRENT_MARK, SELECT_POINTER } from '#/tui/constant/symbols';
 import { currentTheme, type ColorToken } from '#/tui/theme';
+import { createMarkdownTheme } from '#/tui/theme/pi-tui-theme';
+import { createMarkdownOptions } from '#/tui/utils/markdown-options';
+import { Markdown } from '#/tui/components/markdown/markdown';
 import { printableChar } from '#/tui/utils/printable-key';
 import { SearchableList } from '#/tui/utils/searchable-list';
 
@@ -40,6 +43,7 @@ export interface ChoicePickerOptions {
   readonly hint?: string;
   readonly formatHint?: (text: string) => string;
   readonly notice?: string;
+  readonly noticeMarkdown?: string;
   /** Color tone for the notice line. Defaults to 'success'. */
   readonly noticeTone?: 'success' | 'warning';
   readonly options: readonly ChoiceOption[];
@@ -160,7 +164,18 @@ export class ChoicePickerComponent extends Container implements Focusable {
           : this.opts.formatHint(` ${hintLine}`),
       );
     }
-    if (this.opts.notice !== undefined) {
+    if (this.opts.noticeMarkdown !== undefined) {
+      const markdown = new Markdown(
+        this.opts.noticeMarkdown,
+        0,
+        0,
+        createMarkdownTheme(),
+        undefined,
+        createMarkdownOptions(),
+      );
+      lines.push('');
+      lines.push(...markdown.render(Math.max(1, width - 1)).map((line) => ` ${line}`));
+    } else if (this.opts.notice !== undefined) {
       const tone = this.opts.noticeTone ?? 'success';
       const noticeWidth = Math.max(1, width - 1);
       for (const noticeLine of this.opts.notice.split(/\r?\n/)) {

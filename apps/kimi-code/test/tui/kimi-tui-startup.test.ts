@@ -4,6 +4,7 @@ import { join } from 'node:path';
 
 import { log, type GoalSnapshot } from '@moonshot-ai/kimi-code-sdk';
 import type { MigrationPlan } from '@moonshot-ai/migration-legacy';
+import type { Component, Focusable } from '@moonshot-ai/pi-tui';
 import { describe, expect, it, vi } from 'vitest';
 
 import { BannerProvider } from '#/tui/banner/banner-provider';
@@ -15,6 +16,7 @@ import { BannerComponent } from '#/tui/components/chrome/banner';
 import { WelcomeComponent } from '#/tui/components/chrome/welcome';
 import { KimiTUI, type KimiTUIStartupInput, type TUIState } from '#/tui/kimi-tui';
 import { maybeShowModelMigrationPrompt } from '#/tui/controllers/model-migration';
+import type { ApprovalPanelData, QuestionPanelData } from '#/tui/reverse-rpc/types';
 import { REPLAY_FETCH_TURN_LIMIT } from '#/tui/utils/message-replay';
 import { copyTextToClipboard } from '#/utils/clipboard/clipboard-text';
 import { quoteShellArg } from '#/utils/shell-quote';
@@ -2162,6 +2164,114 @@ describe('KimiTUI startup', () => {
       vi.unstubAllEnvs();
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('renders provider migration Markdown after substituting model names', async () => {
+    const driver = makeDriver(makeHarness(), makeStartupInput());
+    installMigrationModels(driver);
+    driver.state.appState.availableModels['acme/current']!.upgrade!.migrationMarkdown =
+      '### Upgrade\n\nSwitch **{model_from}** to **{model_to}**.\n\n- Faster replies';
+
+    const prompt = maybeShowModelMigrationPrompt(driver as any);
+    const picker = driver.state.editorContainer.children[0] as ChoicePickerComponent;
+    const output = picker.render(100).join('\n');
+    expect(output).not.toContain('###');
+    expect(output).not.toContain('**');
+    expect(output).not.toContain('{model_from}');
+    expect(output).toContain('current');
+    expect(output).toContain('next');
+    picker.handleInput('\u001B');
+    await prompt;
+  });
+
+  it.each(['replace', 'restore'])('settles a displaced migration on editor %s without saving', async (action) => {
+    const setConfig = vi.fn();
+    const driver = makeDriver(makeHarness(makeSession(), { setConfig }), makeStartupInput());
+    installMigrationModels(driver);
+    const host = driver as unknown as KimiTUI;
+    const onDisplaced = vi.fn();
+    const settled = vi.fn();
+    const prompt = maybeShowModelMigrationPrompt(host, onDisplaced).then(settled);
+    const oldPicker = driver.state.editorContainer.children[0] as ChoicePickerComponent;
+    const replacement = new ChoicePickerComponent({
+      title: 'Another dialog', options: [], onSelect: vi.fn(), onCancel: vi.fn(),
+    });
+
+    if (action === 'replace') host.mountEditorReplacement(replacement);
+    else host.restoreEditor();
+    await flushMigrationCheck();
+    expect(settled).toHaveBeenCalledOnce();
+    await prompt;
+    expect(onDisplaced).toHaveBeenCalledOnce();
+    oldPicker.handleInput('\r');
+    oldPicker.handleInput('\u001B');
+    expect(driver.state.editorContainer.children[0]).toBe(action === 'replace' ? replacement : driver.state.editor);
+    expect(setConfig).not.toHaveBeenCalled();
+    expect(driver.state.appState.modelMigrations).toEqual({});
+    host.restoreEditor();
+    expect(onDisplaced).toHaveBeenCalledOnce();
+  });
+
+  it.each(['approval', 'question'])('requeues a migration displaced by a background %s', async (modal) => {
+    const session = makeSession();
+    const setConfig = vi.fn();
+    const driver = makeDriver(makeHarness(session, { setConfig }), makeStartupInput({}, {
+      notifications: { enabled: false, condition: 'unfocused' },
+    }));
+    installMigrationModels(driver);
+    const host = driver as unknown as {
+      modelMigration: { request(): void };
+      showApprovalPanel(data: ApprovalPanelData): void;
+      hideApprovalPanel(): void;
+      showQuestionDialog(data: QuestionPanelData): void;
+      hideQuestionDialog(): void;
+      setAppState(patch: Record<string, unknown>): void;
+      restoreEditor(): void;
+    };
+    host.modelMigration.request();
+    await flushMigrationCheck();
+    const oldPicker = driver.state.editorContainer.children[0] as ChoicePickerComponent;
+    expect(oldPicker).toBeInstanceOf(ChoicePickerComponent);
+
+    if (modal === 'approval') {
+      host.showApprovalPanel({
+        id: 'approval-1', tool_call_id: 'tool-1', tool_name: 'WriteFile',
+        action: 'Write file', description: '', display: [],
+        choices: [{ label: 'Approve once', response: 'approved' }],
+      });
+    } else {
+      host.showQuestionDialog({
+        id: 'question-1', tool_call_id: 'tool-1',
+        questions: [{ question: 'Choose a path', multi_select: false, options: [{ label: 'A' }] }],
+      });
+    }
+    const panel = driver.state.editorContainer.children[0] as Component & Focusable;
+    await flushMigrationCheck();
+    expect(panel).not.toBe(oldPicker);
+    expect(panel.focused).toBe(true);
+    oldPicker.handleInput('\r');
+    oldPicker.handleInput('\u001B');
+    expect(driver.state.editorContainer.children[0]).toBe(panel);
+    expect(panel.focused).toBe(true);
+    expect(session.setModel).not.toHaveBeenCalled();
+    expect(setConfig).not.toHaveBeenCalled();
+    expect(driver.state.appState.modelMigrations).toEqual({});
+
+    host.setAppState({ streamingPhase: 'waiting' });
+    if (modal === 'approval') host.hideApprovalPanel();
+    else host.hideQuestionDialog();
+    await flushMigrationCheck();
+    expect(driver.state.editorReplacementMounted).toBe(false);
+    host.setAppState({ streamingPhase: 'idle' });
+    await flushMigrationCheck();
+    const retried = driver.state.editorContainer.children[0] as ChoicePickerComponent;
+    expect(retried).toBeInstanceOf(ChoicePickerComponent);
+    expect(retried).not.toBe(oldPicker);
+    retried.handleInput('\u001B');
+    host.restoreEditor();
+    await flushMigrationCheck();
+    expect(driver.state.editorReplacementMounted).toBe(false);
+    expect(driver.state.appState.modelMigrations).toEqual({});
   });
 
   it('cancels a model migration without acknowledging it', async () => {

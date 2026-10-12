@@ -8,6 +8,8 @@ import {
   handleReloadCommand,
   handleReloadTuiCommand,
 } from '#/tui/commands/reload';
+import { currentTuiConfig } from '#/tui/commands/config';
+import { loadTuiConfig, saveTuiConfig } from '#/tui/config';
 import { currentTheme } from '#/tui/theme';
 import type { SlashCommandHost } from '#/tui/commands';
 import {
@@ -42,6 +44,30 @@ afterEach(async () => {
 });
 
 describe('reload slash commands', () => {
+  describe.each([
+    ['/reload', handleReloadCommand],
+    ['/reload tui', handleReloadTuiCommand],
+  ] as const)('%s migration acknowledgements', (_command, reload) => {
+    it.each([
+      ['edited', '[notice.model_migrations]\n"acme/current" = "next"\n"other/current" = "new"\n',
+        { 'acme/current': 'next', 'other/current': 'new' }],
+      ['deleted', '', {}],
+    ] as const)('preserves externally %s records through later preference saves', async (_case, notice, expected) => {
+      await writeTuiConfig(`theme = "dark"\n${notice}`);
+      const host = makeHost({ session: { id: 'ses-1' } });
+      host.state.appState.modelMigrations = { 'acme/current': 'old', 'removed/current': 'next' };
+
+      await reload(host);
+
+      expect(host.state.appState.modelMigrations).toEqual(expected);
+      host.setAppState({ editorCommand: 'vim' });
+      await saveTuiConfig(currentTuiConfig(host));
+      const saved = await loadTuiConfig();
+      expect(saved.editorCommand).toBe('vim');
+      expect(saved.notice?.modelMigrations ?? {}).toEqual(expected);
+    });
+  });
+
   it('reloads tui.toml without touching Core session state', async () => {
     await writeTuiConfig(`
 theme = "light"
