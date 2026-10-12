@@ -780,6 +780,35 @@ describe('server-v2 /api/v1 provider write endpoints', () => {
     });
   });
 
+  it('rewrites bare model upgrade targets on provider edit', async () => {
+    await boot(
+      `${DEFAULTED_TOML}\n[models."gpt-4.1"]\nprovider = "openai"\nmodel = "gpt-4.1"\nmax_context_size = 1047576\n\n[models.gpt4o.upgrade]\nmodel = "gpt-4.1"\nmigration_markdown = "Use next"\n`,
+    );
+    const { status } = await putJson('/api/v1/providers/openai', {
+      ...REPLACE_BODY,
+      new_id: 'my-openai',
+      models: [
+        { model: 'gpt-4o', max_context_size: 128000 },
+        { model: 'gpt-4.1', max_context_size: 1047576 },
+      ],
+    });
+    expect(status).toBe(200);
+
+    const onDisk = await readConfigToml();
+    expect(onDisk['models']).toMatchObject({
+      'my-openai/gpt-4o': {
+        upgrade: { model: 'my-openai/gpt-4.1', migration_markdown: 'Use next' },
+      },
+    });
+    const models = await getJson<{
+      items: Array<{ model: string; upgrade?: { model: string } }>;
+    }>('/api/v1/models');
+    expect(models.body.data.items.find((item) => item.model === 'my-openai/gpt-4o')?.upgrade).toEqual({
+      model: 'my-openai/gpt-4.1',
+      migration_markdown: 'Use next',
+    });
+  });
+
   it('drops model upgrades whose target disappears on provider edit', async () => {
     await boot(
       `${DEFAULTED_TOML}\n[models."openai/replacement-key"]\nprovider = "openai"\nmodel = "gpt-4.1"\nmax_context_size = 1047576\n\n[models.gpt4o.upgrade]\nmodel = "openai/replacement-key"\nmigration_markdown = "Use next"\n`,

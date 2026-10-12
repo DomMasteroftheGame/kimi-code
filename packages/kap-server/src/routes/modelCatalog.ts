@@ -429,7 +429,7 @@ export function registerModelCatalogRoutes(app: ModelCatalogRouteHost, core: Sco
         for (const entry of req.body.models) {
           const previous = previousByModel.get(entry.model);
           let upgrade = previous?.upgrade;
-          if (upgrade?.model.startsWith(`${provider_id}/`) === true) {
+          if (upgrade !== undefined) {
             const targetModel = models[upgrade.model]?.model;
             const target = targetModel === undefined ? undefined : `${newId}/${targetModel}`;
             upgrade =
