@@ -487,13 +487,21 @@ export function applyCustomRegistryProvider(
     }
   }
 
-  for (const [modelKey, model] of Object.entries(entry.models)) {
+  const modelEntries = Object.entries(entry.models);
+  for (const [modelKey, model] of modelEntries) {
     const aliasKey = `${providerKey}/${modelKey}`;
     const maxContextSize = resolveMaxContextSize(model);
     const capabilities = resolveCapabilities(model);
     const displayName =
       typeof model.name === 'string' && model.name.length > 0 ? model.name : model.id;
     const existing = isRecord(existingModels[aliasKey]) ? existingModels[aliasKey] : {};
+    const upgrade = model.upgrade;
+    const target =
+      upgrade === undefined
+        ? undefined
+        : modelEntries.find(([, candidate]) => candidate.id === upgrade.model);
+    const targetAlias =
+      target === undefined || target[1].id === model.id ? undefined : `${providerKey}/${target[0]}`;
 
     const remoteAlias: ManagedKimiModelAlias = {
       provider: providerKey,
@@ -504,12 +512,12 @@ export function applyCustomRegistryProvider(
       supportEfforts: model.support_efforts,
       defaultEffort: model.default_effort,
       upgrade:
-        model.upgrade === undefined
+        targetAlias === undefined || upgrade === undefined
           ? undefined
           : {
-              model: model.upgrade.model,
-              migrationMarkdown: model.upgrade.migration_markdown,
-              retirementAt: model.upgrade.retirement_at,
+              model: targetAlias,
+              migrationMarkdown: upgrade.migration_markdown,
+              retirementAt: upgrade.retirement_at ?? undefined,
             },
     };
     existingModels[aliasKey] = mergeRefreshedModelAlias(

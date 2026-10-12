@@ -266,7 +266,7 @@ describe('refreshProviderModels modelSource short-circuit', () => {
         failed: [],
       });
       expect(models.list()['acme/current']?.upgrade).toEqual({
-        model: 'next',
+        model: 'acme/next',
         migrationMarkdown: 'Use next',
         retirementAt: '2030-01-01T00:00:00Z',
       });

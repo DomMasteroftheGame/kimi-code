@@ -600,27 +600,39 @@ describe('applyCustomRegistryProvider', () => {
         current: {
           id: 'current',
           upgrade: {
-            model: 'next',
+            model: 'actual-next',
             migration_markdown: 'Use {model_to}',
-            retirement_at: '2030-01-01T00:00:00Z',
+            retirement_at: null,
           },
         },
-        next: { id: 'next', default_effort: 'high' },
+        'replacement-key': { id: 'actual-next', default_effort: 'high' },
+        self: {
+          id: 'self',
+          upgrade: { model: 'self', migration_markdown: 'Ignore self' },
+        },
+        orphan: {
+          id: 'orphan',
+          upgrade: { model: 'missing', migration_markdown: 'Ignore missing' },
+        },
       },
     };
 
     applyCustomRegistryProvider(config, entry, source);
     expect(config.models?.['demo/current']?.['upgrade']).toEqual({
-      model: 'next',
+      model: 'demo/replacement-key',
       migrationMarkdown: 'Use {model_to}',
-      retirementAt: '2030-01-01T00:00:00Z',
     });
+    expect(config.models?.['demo/self']?.['upgrade']).toBeUndefined();
+    expect(config.models?.['demo/orphan']?.['upgrade']).toBeUndefined();
 
     applyCustomRegistryProvider(
       config,
       {
         ...entry,
-        models: { current: { id: 'current' }, next: { id: 'next', default_effort: 'high' } },
+        models: {
+          current: { id: 'current' },
+          'replacement-key': { id: 'actual-next', default_effort: 'high' },
+        },
       },
       source,
     );

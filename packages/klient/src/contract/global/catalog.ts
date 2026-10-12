@@ -23,7 +23,7 @@ export const modelCatalogItemSchema = z.object({
     .object({
       model: z.string(),
       migration_markdown: z.string(),
-      retirement_at: z.string().nullable().optional(),
+      retirement_at: z.string().optional(),
     })
     .optional(),
 });

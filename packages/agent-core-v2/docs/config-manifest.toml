@@ -291,7 +291,7 @@ merge_all_available_skills = true
   # upgrade: object
     # model: string
     # migration_markdown: string
-    # retirement_at: string | null
+    # retirement_at: string
   # overrides: object
     # max_context_size: integer
     # max_input_size: integer

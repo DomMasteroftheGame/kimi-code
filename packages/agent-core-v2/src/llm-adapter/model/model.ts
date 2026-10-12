@@ -9,7 +9,7 @@ import type { OAuthRef } from '../provider/provider';
 export const modelUpgradeSchema = z.object({
   model: z.string().min(1),
   migrationMarkdown: z.string(),
-  retirementAt: z.string().nullable().optional(),
+  retirementAt: z.string().optional(),
 });
 export type ModelUpgrade = z.infer<typeof modelUpgradeSchema>;
 

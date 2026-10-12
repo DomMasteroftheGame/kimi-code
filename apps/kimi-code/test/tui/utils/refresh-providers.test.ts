@@ -422,7 +422,7 @@ describe('refreshAllProviderModels', () => {
     });
     expect(host.current().models?.[currentAlias]).toMatchObject({
       upgrade: {
-        model: 'next',
+        model: `${providerId}/next`,
         migrationMarkdown: 'Use next',
         retirementAt: '2030-01-01T00:00:00Z',
       },
