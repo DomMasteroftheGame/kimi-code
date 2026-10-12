@@ -753,7 +753,7 @@ describe('server-v2 /api/v1 provider write endpoints', () => {
 
   it('rewrites model upgrade targets when renaming a provider', async () => {
     await boot(
-      `${DEFAULTED_TOML}\n[models.gpt4o.upgrade]\nmodel = "openai/gpt-4.1"\nmigration_markdown = "Use next"\n`,
+      `${DEFAULTED_TOML}\n[models."openai/replacement-key"]\nprovider = "openai"\nmodel = "gpt-4.1"\nmax_context_size = 1047576\n\n[models.gpt4o.upgrade]\nmodel = "openai/replacement-key"\nmigration_markdown = "Use next"\n`,
     );
     const { status } = await putJson('/api/v1/providers/openai', {
       ...REPLACE_BODY,
@@ -782,7 +782,7 @@ describe('server-v2 /api/v1 provider write endpoints', () => {
 
   it('drops model upgrades whose target disappears on provider edit', async () => {
     await boot(
-      `${DEFAULTED_TOML}\n[models.gpt4o.upgrade]\nmodel = "openai/gpt-4.1"\nmigration_markdown = "Use next"\n`,
+      `${DEFAULTED_TOML}\n[models."openai/replacement-key"]\nprovider = "openai"\nmodel = "gpt-4.1"\nmax_context_size = 1047576\n\n[models.gpt4o.upgrade]\nmodel = "openai/replacement-key"\nmigration_markdown = "Use next"\n`,
     );
     const { status } = await putJson('/api/v1/providers/openai', {
       ...REPLACE_BODY,

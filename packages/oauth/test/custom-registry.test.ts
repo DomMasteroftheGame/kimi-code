@@ -184,6 +184,28 @@ describe('fetchCustomRegistry', () => {
     });
   });
 
+  it('accepts lowercase RFC3339 separators', async () => {
+    const body = makeKokubResponseBody();
+    body['registry_chat-completions']!.models['gpt-5.5'] = {
+      id: 'gpt-5.5',
+      upgrade: {
+        model: 'gpt-6',
+        migration_markdown: 'Use GPT-6',
+        retirement_at: '2030-01-01t00:00:00z',
+      },
+    };
+    const fetchMock = vi.fn(async () => makeJsonResponse(body));
+
+    const result = await fetchCustomRegistry(
+      KOKUB_SOURCE,
+      { fetchImpl: fetchMock as unknown as typeof fetch },
+    );
+
+    expect(result['registry_chat-completions']?.models['gpt-5.5']?.upgrade?.retirement_at).toBe(
+      '2030-01-01t00:00:00z',
+    );
+  });
+
   it('rejects malformed upgrade timestamps', async () => {
     const body = makeKokubResponseBody();
     body['registry_chat-completions']!.models['gpt-5.5'] = {
