@@ -112,6 +112,40 @@ describe('fetchCustomRegistry', () => {
     });
   });
 
+  it.each([
+    {
+      name: 'input only',
+      modalities: { input: ['text', 'image', 'video'] },
+      capabilities: ['image_in', 'video_in'],
+    },
+    {
+      name: 'output only',
+      modalities: { output: ['text', 'image', 'audio'] },
+      capabilities: ['image_out', 'audio_out'],
+    },
+    { name: 'empty input only', modalities: { input: [] }, capabilities: [] },
+    { name: 'empty output only', modalities: { output: [] }, capabilities: [] },
+  ])('preserves $name modalities through parsing and configuration', async ({ modalities, capabilities }) => {
+    const body = makeKokubResponseBody();
+    const upgrade = { model: 'next', migration_markdown: 'Use {model_to}' };
+    body['registry_chat-completions']!.models['current'] = { id: 'current', modalities, upgrade };
+    body['registry_chat-completions']!.models['next'] = { id: 'next' };
+    const fetchMock = vi.fn(async () => makeJsonResponse(body));
+
+    const result = await fetchCustomRegistry(
+      KOKUB_SOURCE,
+      { fetchImpl: fetchMock as unknown as typeof fetch },
+    );
+    const provider = result['registry_chat-completions']!;
+
+    expect(provider.models['current']?.modalities).toEqual(modalities);
+    expect(provider.models['current']?.upgrade).toEqual(upgrade);
+
+    const config: ManagedKimiConfigShape = { providers: {} };
+    applyCustomRegistryProvider(config, provider, KOKUB_SOURCE);
+    expect(config.models?.['registry_chat-completions/current']).toMatchObject({ capabilities });
+  });
+
   it('parses upgrade metadata and null retirement time', async () => {
     const body = makeKokubResponseBody();
     body['registry_chat-completions']!.models['gpt-5.5'] = {
@@ -548,6 +582,49 @@ describe('applyCustomRegistryProvider', () => {
     const alias = config.models?.['registry_chat-completions/gpt-5.5'];
     expect(alias?.['supportEfforts']).toBeUndefined();
     expect(alias?.['defaultEffort']).toBeUndefined();
+  });
+
+  it('persists upgrade metadata and clears it when upstream removes it', () => {
+    const config: ManagedKimiConfigShape = { providers: {} };
+    const source = {
+      kind: 'apiJson' as const,
+      url: 'https://demo.example/api.json',
+      apiKey: 'x',
+    };
+    const entry: CustomRegistryProviderEntry = {
+      id: 'demo',
+      name: 'Demo',
+      api: 'https://demo.example/v1',
+      type: 'openai',
+      models: {
+        current: {
+          id: 'current',
+          upgrade: {
+            model: 'next',
+            migration_markdown: 'Use {model_to}',
+            retirement_at: '2030-01-01T00:00:00Z',
+          },
+        },
+        next: { id: 'next', default_effort: 'high' },
+      },
+    };
+
+    applyCustomRegistryProvider(config, entry, source);
+    expect(config.models?.['demo/current']?.['upgrade']).toEqual({
+      model: 'next',
+      migrationMarkdown: 'Use {model_to}',
+      retirementAt: '2030-01-01T00:00:00Z',
+    });
+
+    applyCustomRegistryProvider(
+      config,
+      {
+        ...entry,
+        models: { current: { id: 'current' }, next: { id: 'next', default_effort: 'high' } },
+      },
+      source,
+    );
+    expect(config.models?.['demo/current']?.['upgrade']).toBeUndefined();
   });
 
   it('does not preserve apiKeyEnv when the colliding provider is manual (no registry source)', () => {

@@ -16,7 +16,12 @@ import {
   transformPlainObject,
 } from '#/app/config/toml';
 import { type AssertExact, type Equal } from '#/_base/utils/typeEquality';
-import type { ModelOverride, ModelRecord, ModelsSection } from '#/llm-adapter/model/model';
+import {
+  modelUpgradeSchema,
+  type ModelOverride,
+  type ModelRecord,
+  type ModelsSection,
+} from '#/llm-adapter/model/model';
 import type { ThinkingConfig } from '#/llm-adapter/model/thinking';
 import type { OAuthRef, ProviderConfig, ProvidersSection } from '#/llm-adapter/provider/provider';
 import { ProtocolSchema } from '#/llm-adapter/protocol/protocol';
@@ -173,6 +178,7 @@ const ModelBaseSchema = z.object({
   supportEfforts: z.array(z.string()).optional(),
   defaultEffort: z.string().optional(),
   offEffort: z.string().optional(),
+  upgrade: modelUpgradeSchema.optional(),
 });
 
 export const ModelOverrideSchema = ModelBaseSchema.omit({
@@ -186,6 +192,7 @@ export const ModelOverrideSchema = ModelBaseSchema.omit({
   provider: true,
   model: true,
   betaApi: true,
+  upgrade: true,
 }).partial();
 
 export const ModelRecordSchema = ModelBaseSchema.extend({
@@ -262,6 +269,9 @@ export const modelsFromToml = (rawSnake: unknown): unknown => {
     if (isPlainObject(converted['overrides'])) {
       converted['overrides'] = transformPlainObject(converted['overrides']);
     }
+    if (isPlainObject(converted['upgrade'])) {
+      converted['upgrade'] = transformPlainObject(converted['upgrade']);
+    }
     out[id] = converted;
   }
   return out;
@@ -282,6 +292,8 @@ export const modelsToToml = (value: unknown, rawSnake: unknown): unknown => {
         merged[camelToSnake(key)] = [...field];
       } else if (key === 'overrides' && isPlainObject(field)) {
         merged['overrides'] = modelOverridesToToml(field, merged['overrides']);
+      } else if (key === 'upgrade' && isPlainObject(field)) {
+        merged['upgrade'] = plainObjectToToml(field, merged['upgrade']);
       } else {
         setDefined(merged, camelToSnake(key), field);
       }

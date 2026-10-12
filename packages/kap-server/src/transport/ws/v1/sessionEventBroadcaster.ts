@@ -31,7 +31,6 @@ import type {
   DiUnitChangedEvent,
   ModelCatalogRefreshChange,
   ModelCatalogRefreshFailure,
-  ModelMigrationCandidate,
   SessionCreatedEvent,
   SessionMetaUpdatedEvent,
   Event,
@@ -802,7 +801,6 @@ export class SessionEventBroadcaster {
         changed: payload.changed,
         unchanged: payload.unchanged,
         failed: payload.failed,
-        migrations: payload.migrations,
         agentId: 'main',
         sessionId: GLOBAL_SESSION_ID,
       } as Event).catch((error: unknown) =>
@@ -1553,7 +1551,6 @@ function modelCatalogChangedPayload(
       changed: ModelCatalogRefreshChange[];
       unchanged: string[];
       failed: ModelCatalogRefreshFailure[];
-      migrations?: ModelMigrationCandidate[];
     }
   | undefined {
   const parsed = modelCatalogChangedPayloadSchema.safeParse(payload);

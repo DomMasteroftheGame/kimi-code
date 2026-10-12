@@ -200,7 +200,7 @@ describe('refreshProviderModels modelSource short-circuit', () => {
     }
   });
 
-  it('maps migration candidates and publishes them when the catalog is otherwise unchanged', async () => {
+  it('persists upgrade metadata and publishes an ordinary catalog change', async () => {
     const fetchMock = vi.fn(
       async () =>
         new Response(
@@ -228,7 +228,7 @@ describe('refreshProviderModels modelSource short-circuit', () => {
     );
     vi.stubGlobal('fetch', fetchMock);
 
-    const { host, discovery, events } = await createHost({
+    const { host, config, discovery, events, models } = await createHost({
       providers: {
         ...staticProviders,
         acme: {
@@ -260,26 +260,19 @@ describe('refreshProviderModels modelSource short-circuit', () => {
     });
     try {
       const result = await discovery.refreshProviderModels({ scope: 'all' });
-      expect(result.changed).toEqual([]);
-      expect(result.unchanged).toEqual(['acme']);
-      expect(result.failed).toEqual([]);
-      expect(result.migrations).toEqual([
-        {
-          provider_id: 'acme',
-          from_alias: 'acme/current',
-          from_model: 'current',
-          to_alias: 'acme/next',
-          to_model: 'next',
-          migration_markdown: 'Use next',
-          retirement_at: '2030-01-01T00:00:00Z',
-          target_default_effort: 'high',
-        },
-      ]);
+      expect(result).toEqual({
+        changed: [{ provider_id: 'acme', provider_name: 'Acme', added: 0, removed: 0 }],
+        unchanged: [],
+        failed: [],
+      });
+      expect(models.list()['acme/current']?.upgrade).toEqual({
+        model: 'next',
+        migrationMarkdown: 'Use next',
+        retirementAt: '2030-01-01T00:00:00Z',
+      });
+      expect(config.get<string>('defaultModel')).toBe('s1');
       expect(events.published).toEqual([
-        expect.objectContaining({
-          type: 'event.model_catalog.changed',
-          payload: expect.objectContaining({ migrations: result.migrations }),
-        }),
+        expect.objectContaining({ type: 'event.model_catalog.changed', payload: result }),
       ]);
     } finally {
       host.dispose();

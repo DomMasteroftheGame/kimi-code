@@ -347,7 +347,7 @@ describe('refreshAllProviderModels', () => {
     expect(host.current().models?.[userAlias]).toEqual(userAliasModel);
   });
 
-  it('returns valid migration candidates without changing the default model', async () => {
+  it('persists upgrade metadata without changing the default model', async () => {
     const registryUrl = 'https://registry.example.test/v1/models/api.json';
     const providerId = 'example_chat-completions';
     const currentAlias = `${providerId}/current`;
@@ -376,20 +376,6 @@ describe('refreshAllProviderModels', () => {
           displayName: 'next',
           defaultEffort: 'high',
         },
-        [`${providerId}/self`]: {
-          provider: providerId,
-          model: 'self',
-          maxContextSize: 131072,
-          capabilities: ['tool_use'],
-          displayName: 'self',
-        },
-        [`${providerId}/orphan`]: {
-          provider: providerId,
-          model: 'orphan',
-          maxContextSize: 131072,
-          capabilities: ['tool_use'],
-          displayName: 'orphan',
-        },
       },
       defaultModel: currentAlias,
       telemetry: true,
@@ -414,14 +400,6 @@ describe('refreshAllProviderModels', () => {
                   },
                 },
                 next: { id: 'next', default_effort: 'high' },
-                self: {
-                  id: 'self',
-                  upgrade: { model: 'self', migration_markdown: 'Ignore self' },
-                },
-                orphan: {
-                  id: 'orphan',
-                  upgrade: { model: 'missing', migration_markdown: 'Ignore missing' },
-                },
               },
             },
           }),
@@ -437,23 +415,20 @@ describe('refreshAllProviderModels', () => {
       resolveOAuthToken: vi.fn(),
     });
 
-    expect(result.failed).toEqual([]);
-    expect(result.changed).toEqual([]);
-    expect(result.unchanged).toEqual([providerId]);
-    expect(result.migrations).toEqual([
-      {
-        providerId,
-        fromAlias: currentAlias,
-        fromModel: 'current',
-        toAlias: `${providerId}/next`,
-        toModel: 'next',
+    expect(result).toEqual({
+      changed: [{ providerId, providerName: 'Example', added: 0, removed: 0 }],
+      unchanged: [],
+      failed: [],
+    });
+    expect(host.current().models?.[currentAlias]).toMatchObject({
+      upgrade: {
+        model: 'next',
         migrationMarkdown: 'Use next',
         retirementAt: '2030-01-01T00:00:00Z',
-        targetDefaultEffort: 'high',
       },
-    ]);
+    });
     expect(host.current().defaultModel).toBe(currentAlias);
-    expect(host.setConfig).not.toHaveBeenCalled();
+    expect(host.setConfig).toHaveBeenCalledTimes(1);
   });
 
   it('adds custom-registry providers that appear under an existing source URL', async () => {

@@ -2,4 +2,4 @@
 "@moonshot-ai/kimi-code": patch
 ---
 
-Add model upgrade guidance to web and desktop, with migration notices and a preselected replacement in model settings.
+Expose custom-registry model upgrade metadata in model configuration and the `/models` API so clients can guide users through model migration.

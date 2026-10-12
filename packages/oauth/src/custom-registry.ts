@@ -230,7 +230,7 @@ function toModelEntry(value: unknown): CustomRegistryModelEntry | undefined {
   if (isRecord(modalities)) {
     const input = toStringArrayOrUndefined(modalities['input']);
     const output = toStringArrayOrUndefined(modalities['output']);
-    if (input !== undefined && output !== undefined) {
+    if (input !== undefined || output !== undefined) {
       entry.modalities = {
         ...(input !== undefined ? { input } : {}),
         ...(output !== undefined ? { output } : {}),
@@ -249,7 +249,7 @@ function toModelEntry(value: unknown): CustomRegistryModelEntry | undefined {
     }
     const migrationMarkdown = rawUpgrade['migration_markdown'];
     if (typeof migrationMarkdown !== 'string') {
-      throw new Error(`Invalid upgrade for model "${id}": migration_markdown must be a string.`);
+      throw new TypeError(`Invalid upgrade for model "${id}": migration_markdown must be a string.`);
     }
     const retirementAt = rawUpgrade['retirement_at'];
     if (!isValidRetirementAt(retirementAt)) {
@@ -503,6 +503,14 @@ export function applyCustomRegistryProvider(
       displayName,
       supportEfforts: model.support_efforts,
       defaultEffort: model.default_effort,
+      upgrade:
+        model.upgrade === undefined
+          ? undefined
+          : {
+              model: model.upgrade.model,
+              migrationMarkdown: model.upgrade.migration_markdown,
+              retirementAt: model.upgrade.retirement_at,
+            },
     };
     existingModels[aliasKey] = mergeRefreshedModelAlias(
       existing,
