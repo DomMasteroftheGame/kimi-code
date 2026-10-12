@@ -287,13 +287,14 @@ export const modelsToToml = (value: unknown, rawSnake: unknown): unknown => {
       continue;
     }
     const merged = cloneRecord(rawSub[id]);
+    if (!Object.hasOwn(entry, 'upgrade')) delete merged['upgrade'];
     for (const [key, field] of Object.entries(entry)) {
       if (key === 'capabilities' && Array.isArray(field)) {
         merged[camelToSnake(key)] = [...field];
       } else if (key === 'overrides' && isPlainObject(field)) {
         merged['overrides'] = modelOverridesToToml(field, merged['overrides']);
-      } else if (key === 'upgrade' && isPlainObject(field)) {
-        merged['upgrade'] = plainObjectToToml(field, merged['upgrade']);
+      } else if (key === 'upgrade') {
+        merged['upgrade'] = isPlainObject(field) ? plainObjectToToml(field, undefined) : undefined;
       } else {
         setDefined(merged, camelToSnake(key), field);
       }
