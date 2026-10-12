@@ -52,6 +52,7 @@ function canShowModelMigrationPrompt(host: SlashCommandHost): boolean {
     host.state.activeDialog === null &&
     !host.state.editorReplacementMounted &&
     !host.state.externalEditorRunning &&
+    !host.sessionReplacementInFlight &&
     !host.state.appState.isCompacting &&
     !host.state.appState.isReplaying &&
     host.state.appState.streamingPhase === 'idle' &&

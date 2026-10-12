@@ -2091,6 +2091,44 @@ describe('KimiTUI startup', () => {
     picker.handleInput('\u001B');
   });
 
+  it('does not mount a migration while /new is replacing the session', async () => {
+    const getStatus = vi.fn(async () => ({
+      model: 'acme/current', thinkingEffort: 'off', permission: 'manual', planMode: false,
+      contextTokens: 10, maxContextTokens: 100, contextUsage: 0.1,
+    }));
+    const oldSession = makeSession({ getStatus });
+    const newSession = makeSession({ id: 'ses-2', getStatus });
+    let completeCreation!: () => void;
+    const harness = makeHarness(newSession, {
+      createSession: vi.fn(async () => {
+        await new Promise<void>((resolve) => { completeCreation = resolve; });
+        return newSession;
+      }),
+    });
+    const driver = makeDriver(harness, makeStartupInput());
+    installMigrationModels(driver);
+    await driver.setSession(oldSession);
+    const startup = driver as unknown as {
+      modelMigration: { request(): void };
+      createNewSession(): Promise<void>;
+    };
+
+    startup.modelMigration.request();
+    const replacing = startup.createNewSession();
+    await flushMigrationCheck();
+    expect(harness.createSession).toHaveBeenCalledTimes(1);
+    expect(driver.state.editorReplacementMounted).toBe(false);
+    expect(newSession.setModel).not.toHaveBeenCalled();
+
+    completeCreation();
+    await replacing;
+    await flushMigrationCheck();
+    const picker = driver.state.editorContainer.children[0] as ChoicePickerComponent;
+    expect(picker).toBeInstanceOf(ChoicePickerComponent);
+    expect(picker.render(100).join('\n')).toContain('Model migration available');
+    picker.handleInput('\u001B');
+  });
+
   it.each([true, false])('checks migrations after the startup session picker (refresh first: %s)', async (refreshFirst) => {
     const session = makeSession({ getStatus: vi.fn(async () => ({
       model: 'acme/current', thinkingEffort: 'off', permission: 'manual', planMode: false,

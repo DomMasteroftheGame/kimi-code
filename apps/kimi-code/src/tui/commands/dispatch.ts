@@ -158,6 +158,8 @@ export interface SlashCommandHost {
   ensureSession(): Promise<Session | undefined>;
   /** Await the in-flight lazy session creation, if any (v2); no-op otherwise. */
   waitForLazyCreation(): Promise<void>;
+  /** True while a `/new` replacement is assembling; idle checks must treat it as busy. */
+  readonly sessionReplacementInFlight: boolean;
   switchToSession(session: Session, message: string): Promise<void>;
   reloadCurrentSessionView(session: Session, message: string): Promise<void>;
   beginSessionRequest(): void;
