@@ -10,6 +10,7 @@ import {
 import { currentTuiConfig, effectiveModelForHost, performModelSwitch } from '../commands/config';
 import type { SlashCommandHost } from '../commands/dispatch';
 import { saveTuiConfig } from '../config';
+import { sanitizeShellOutput } from '../utils/shell-output';
 
 interface ModelMigration {
   readonly fromAlias: string;
@@ -46,21 +47,24 @@ function findModelMigration(host: SlashCommandHost): ModelMigration | undefined 
       ? liveEffort
       : defaultThinkingEffortFor(targetModel);
   const migrationMarkdown = upgrade.migrationMarkdown.trim();
+  // Registry-supplied text reaches the terminal verbatim through pi-tui, so
+  // strip control sequences the same way captured command output is.
   return {
     fromAlias,
     fromModel: from.model,
     toAlias,
     toModel: to.model,
-    displayName: modelDisplayName(toAlias, targetModel),
+    displayName: sanitizeShellOutput(modelDisplayName(toAlias, targetModel)),
     effort,
     effortHint:
       thinkingAvailability(targetModel) === 'unsupported' ? undefined : `thinking ${effort}`,
-    migrationMarkdown:
+    migrationMarkdown: sanitizeShellOutput(
       migrationMarkdown.length > 0
         ? migrationMarkdown
             .replaceAll('{model_from}', from.model)
             .replaceAll('{model_to}', to.model)
         : `We recommend switching from ${from.model} to ${to.model}.`,
+    ),
     retirementAt: upgrade.retirementAt,
   };
 }

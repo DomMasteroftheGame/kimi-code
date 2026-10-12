@@ -2277,6 +2277,26 @@ describe('KimiTUI startup', () => {
     await prompt;
   });
 
+  it('strips terminal control sequences from registry-provided migration text', async () => {
+    const driver = makeDriver(makeHarness(), makeStartupInput());
+    installMigrationModels(driver);
+    driver.state.appState.availableModels['acme/current']!.upgrade!.migrationMarkdown =
+      'Move to {model_to}\u001B]0;pwned\u0007 soon\u001B[2J';
+    driver.state.appState.availableModels['acme/next']!.displayName =
+      'Next\u001B]8;;https://example.test\u0007';
+
+    const prompt = maybeShowModelMigrationPrompt(driver as any);
+    const picker = driver.state.editorContainer.children[0] as ChoicePickerComponent;
+    const output = picker.render(100).join('\n');
+    expect(output).toContain('Move to next soon');
+    expect(output).toContain('Switch to Next');
+    expect(output).not.toContain('pwned');
+    expect(output).not.toContain('\u001B[2J');
+    expect(output).not.toContain('example.test');
+    picker.handleInput('\u001B');
+    await prompt;
+  });
+
   it.each(['replace', 'restore'])('settles a displaced migration on editor %s without saving', async (action) => {
     const setConfig = vi.fn();
     const driver = makeDriver(makeHarness(makeSession(), { setConfig }), makeStartupInput());
