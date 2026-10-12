@@ -58,6 +58,7 @@ function validateTaskId(taskId: string): void {
 
 export class AgentTaskPersistence {
   private readonly spillDirsCreated = new Set<string>();
+  private spillWriteFailed = false;
 
   constructor(
     private readonly agentDir: string,
@@ -91,7 +92,7 @@ export class AgentTaskPersistence {
 
   private async outputPathFor(taskId: string, root: AgentTaskPersistenceRoot): Promise<string> {
     const target = this.spillTarget?.();
-    if (target !== undefined) return join(target.dir, `${taskId}.log`);
+    if (target !== undefined && !this.spillWriteFailed) return join(target.dir, `${taskId}.log`);
     return this.taskOutputFileAt(taskId, root);
   }
 
@@ -129,7 +130,10 @@ export class AgentTaskPersistence {
         this.spillDirsCreated.add(target.dir);
       }
       await target.fs.appendText(join(target.dir, `${taskId}.log`), chunk);
-    } catch {}
+      this.spillWriteFailed = false;
+    } catch {
+      this.spillWriteFailed = true;
+    }
   }
 
   async taskOutputSizeBytes(taskId: string): Promise<number> {

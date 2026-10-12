@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { tmpdir } from 'node:os';
 
 import { normalize } from 'pathe';
 
@@ -11,7 +10,7 @@ import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory'
 import { IAgentReminderService } from '#/features/reminder/reminderService';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
 import { PlanModeInjection } from '#/features/plan/injection/planModeInjection';
-import { environmentTempTarget, IAgentEnvironmentService } from '#/agent/environmentBinding/agentEnvironment';
+import { IAgentEnvironmentService } from '#/agent/environmentBinding/agentEnvironment';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { IAgentToolApprovalService } from '#/agent/toolApproval/toolApproval';
@@ -23,10 +22,11 @@ import type {
 } from '#/agent/toolExecutor/toolHooks';
 import { IEventBus } from '#/app/event/eventBus';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
-import type { IHostFileSystem } from '#/os/interface/hostFileSystem';
+import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { isHostFsNotFound } from '#/os/interface/hostFsErrors';
 import { IBlobStore } from '#/persistence/interface/blobStore';
-import { LOCAL_ENVIRONMENT_ID, realpathExistingPrefix, type EnvironmentPath } from '#/environment/environment';
+import { POSIX_ENVIRONMENT_PATH } from '#/environment/environmentDefaults';
+import { realpathExistingPrefix, type EnvironmentPath } from '#/environment/environment';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { IEventDispatcher } from '#/state/eventDispatcher';
 import { AgentStatusUpdated } from '#/agent/usage/usageEvents';
@@ -59,6 +59,7 @@ export class AgentPlanService extends Service implements IAgentPlanService {
   constructor(
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
     @IAgentEnvironmentService private readonly environment: IAgentEnvironmentService,
+    @IHostFileSystem private readonly hostFs: IHostFileSystem,
     @IBlobStore private readonly blobs: IBlobStore,
     @IAgentReminderService reminder: IAgentReminderService,
     @IEventBus eventBus: IEventBus,
@@ -248,16 +249,12 @@ export class AgentPlanService extends Service implements IAgentPlanService {
     };
   }
 
-  private planFileTarget(id: string): PlanFileTarget | undefined {
-    const target = environmentTempTarget(this.environment, 'plans', tmpdir());
-    if (target === undefined) return undefined;
-    const directory = this.environment.inspect().identity.environmentId === LOCAL_ENVIRONMENT_ID
-      ? target.path.join(this.sessionCtx.sessionDir, 'agents', this.agentCtx.agentId, 'plans')
-      : target.path.join(target.dir, this.agentCtx.agentId);
+  private planFileTarget(id: string): PlanFileTarget {
+    const directory = POSIX_ENVIRONMENT_PATH.join(this.sessionCtx.sessionDir, 'agents', this.agentCtx.agentId, 'plans');
     return {
-      fs: target.fs,
-      environmentPath: target.path,
-      path: target.path.join(directory, `${id}.md`),
+      fs: this.hostFs,
+      environmentPath: POSIX_ENVIRONMENT_PATH,
+      path: POSIX_ENVIRONMENT_PATH.join(directory, `${id}.md`),
     };
   }
 

@@ -316,6 +316,7 @@ describe('AgentTaskPersistence', () => {
       await spill.appendTaskOutput('bash-mirror02', 'still-recorded');
       const snapshot = await spill.readTaskOutputSnapshot('bash-mirror02', 100);
       expect(snapshot?.preview).toBe('still-recorded');
+      expect(snapshot?.outputPath).toBe(join(sessionDir, AGENT_SCOPE, 'tasks', 'bash-mirror02', 'output.log'));
     });
 
     it('keeps the server-local output path when no spill target is present', async () => {

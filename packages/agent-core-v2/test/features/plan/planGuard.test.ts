@@ -16,6 +16,7 @@ import { IAgentPlanService } from '#/features/plan/plan';
 import { AgentPlanService } from '#/features/plan/planService';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { AgentStateService } from '#/agent/state/agentStateService';
+import { ISessionContext, makeSessionContext } from '#/session/sessionContext/sessionContext';
 import { IAgentToolApprovalService } from '#/agent/toolApproval/toolApproval';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import type {
@@ -26,6 +27,7 @@ import { ITelemetryService } from '#/app/telemetry/telemetry';
 import type { ToolCall } from '#human/llm/message';
 import { IAgentEnvironmentService } from '#/agent/environmentBinding/agentEnvironment';
 import { HostFsError } from '#/os/interface/hostFsErrors';
+import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { ToolAccesses } from '#/tool/toolContract';
 import type { ToolInputDisplay } from '#/tool/toolInputDisplay';
 
@@ -39,7 +41,7 @@ import { stubPlanEnvironment } from './stubs';
 const signal = new AbortController().signal;
 const TEMP_DIR = '/var/folders/x/T';
 const PLAN_ID = 'plan-1';
-const PLAN_PATH = `${TEMP_DIR}/kimi-code/plans/test-agent/${PLAN_ID}.md`;
+const PLAN_PATH = `${TEMP_DIR}/agents/test-agent/plans/${PLAN_ID}.md`;
 
 const options = [
   { label: 'Approach A', description: 'Small change.' },
@@ -171,7 +173,7 @@ describe('AgentPlanService plan-guard listener', () => {
     };
   }
 
-  function buildServices(environment: IAgentEnvironmentService): void {
+  function buildServices(environment: IAgentEnvironmentService, sessionDir = TEMP_DIR): void {
     const toolApproval: IAgentToolApprovalService = {
       _serviceBrand: undefined,
       resolvePermissionResolution: async () => {
@@ -190,6 +192,14 @@ describe('AgentPlanService plan-guard listener', () => {
       additionalServices: (reg) => {
         registerTestAgentWireServices(reg);
         reg.defineInstance(IAgentEnvironmentService, environment);
+        reg.defineInstance(IHostFileSystem, environment.inspect().fs ?? createFakeHostFs());
+        reg.defineInstance(ISessionContext, makeSessionContext({
+          sessionId: 'session',
+          workspaceId: 'workspace',
+          sessionDir,
+          sessionScope: 'sessions/session',
+          cwd: '/workspace',
+        }));
         reg.definePartialInstance(IAgentContextMemoryService, {});
         reg.defineInstance(IAgentReminderService, createReminderStub());
         reg.defineInstance(IAgentToolExecutorService, executorEvents.executor);
@@ -324,11 +334,11 @@ describe('AgentPlanService plan-guard listener', () => {
       expect(permissionRan).toBe(false);
     });
 
-    it('denies every write when the plan file location cannot be resolved', async () => {
+    it('keeps the plan file in the local session directory when the environment is unavailable', async () => {
       buildServices(unavailableEnvironment());
       const svc = await enterPlan();
 
-      expect((await svc.status())?.path).toBeNull();
+      expect((await svc.status())?.path).toBe(PLAN_PATH);
       const decision = await run(
         hookContext('Write', {
           args: { path: PLAN_PATH },
@@ -336,8 +346,7 @@ describe('AgentPlanService plan-guard listener', () => {
         }),
       );
 
-      expect(decision?.veto?.isError).toBe(true);
-      expect(decision?.veto?.output).toContain('no plan file selected yet');
+      expect(decision).toBeUndefined();
       expect(permissionRan).toBe(false);
     });
 
@@ -438,6 +447,19 @@ describe('AgentPlanService plan-guard listener', () => {
       expect(decision).toBeUndefined();
       expect(permissionRan).toBe(true);
     });
+  });
+
+  it('keeps plan files local and isolated by session', async () => {
+    buildServices(unavailableEnvironment(), `${TEMP_DIR}/session-a`);
+    const first = ix;
+    buildServices(unavailableEnvironment(), `${TEMP_DIR}/session-b`);
+    const second = ix;
+    const firstPlan = first.get(IAgentPlanService);
+    const secondPlan = second.get(IAgentPlanService);
+    await Promise.all([firstPlan.enter(PLAN_ID), secondPlan.enter(PLAN_ID)]);
+
+    expect((await firstPlan.status())!.path).toBe(`${TEMP_DIR}/session-a/agents/test-agent/plans/${PLAN_ID}.md`);
+    expect((await secondPlan.status())!.path).toBe(`${TEMP_DIR}/session-b/agents/test-agent/plans/${PLAN_ID}.md`);
   });
 
   describe('exit plan mode review', () => {
