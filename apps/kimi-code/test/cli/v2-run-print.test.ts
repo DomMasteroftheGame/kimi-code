@@ -380,7 +380,7 @@ describe('runV2Print', () => {
   });
 
   it('records KIMI_CODE_INVOKED_BY as the session source when set', async () => {
-    vi.stubEnv('KIMI_CODE_INVOKED_BY', 'codex');
+    vi.stubEnv('KIMI_CODE_INVOKED_BY', 'external-agent');
     const stdout = writer();
     const stderr = writer();
     const { app, agent, sessionServices } = makeFakeHarness();
@@ -392,7 +392,7 @@ describe('runV2Print', () => {
 
     const metadata = sessionServices.get(ISessionMetadata) as { update: ReturnType<typeof vi.fn> };
     expect(metadata.update).toHaveBeenCalledWith({
-      custom: { existing: true, source: 'codex' },
+      custom: { existing: true, source: 'external-agent' },
     });
   });
 
