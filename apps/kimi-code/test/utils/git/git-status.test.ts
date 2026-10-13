@@ -67,6 +67,7 @@ beforeEach(() => {
   watchers = [];
   pendingGit = [];
   pendingGh = [];
+  delete process.env['GIT_DIR'];
   mocks.resolveCommandPath.mockImplementation((command: string) => `/usr/bin/${command}`);
   mocks.chokidarWatch.mockImplementation(() => {
     const watcher = new FakeWatcher();
@@ -313,6 +314,25 @@ describe('git status cache', () => {
     const cache = createGitStatusCache(worktree);
     await flushMicrotasks();
     expect(cache.getStatus()?.branch).toBe('worktree');
+    expect(mocks.chokidarWatch).toHaveBeenCalledWith(
+      join(gitDir, 'HEAD'),
+      expect.objectContaining({ usePolling: true }),
+    );
+    cache.dispose();
+  });
+
+  it('honors GIT_DIR from the environment when selecting the repository', async () => {
+    const gitDir = resolve('/virtual/env-gitdir');
+    fakeFiles.set(join(gitDir, 'HEAD'), {
+      type: 'file',
+      content: 'ref: refs/heads/env-selected\n',
+    });
+    process.env['GIT_DIR'] = gitDir;
+
+    const cache = createGitStatusCache(workDir);
+    await flushMicrotasks();
+
+    expect(cache.getStatus()?.branch).toBe('env-selected');
     expect(mocks.chokidarWatch).toHaveBeenCalledWith(
       join(gitDir, 'HEAD'),
       expect.objectContaining({ usePolling: true }),

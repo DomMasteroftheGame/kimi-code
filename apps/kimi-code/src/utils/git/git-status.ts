@@ -312,6 +312,14 @@ interface RepoLocation {
 }
 
 async function findRepo(workDir: string): Promise<RepoLocation | null> {
+  const envGitDir = process.env['GIT_DIR'];
+  if (envGitDir !== undefined && envGitDir.trim().length > 0) {
+    const gitDir = isAbsolute(envGitDir) ? envGitDir : resolve(workDir, envGitDir);
+    const headPath = join(gitDir, 'HEAD');
+    const branch = await readHeadBranch(headPath);
+    return branch === null ? null : { headPath, branch };
+  }
+
   let dir = resolve(workDir);
   for (;;) {
     const dotGit = join(dir, '.git');
