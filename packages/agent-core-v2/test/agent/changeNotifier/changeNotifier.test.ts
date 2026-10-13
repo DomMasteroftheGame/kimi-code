@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, normalize, basename, dirname } from 'pathe';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { DisposableStore } from '#/_base/di/lifecycle';
 import { createServices, type TestInstantiationService } from '#/_base/di/test';
@@ -23,6 +23,8 @@ import { IAgentProfileService, type ProfileData } from '#/agent/profile/profile'
 import { IAgentReminderService } from '#/features/reminder/reminderService';
 import { createReminderStub } from '../../features/reminder/stubs';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import { ISessionInstructionsProvider } from '#/session/sessionInstructions/instructionsProvider';
+import type { WatchChange } from '#human/utils/watch';
 import { ISessionSkillCatalog } from '#/features/skill/session/skillCatalog';
 import type { SkillCatalog } from '#/features/skill/catalog/types';
 import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
@@ -63,6 +65,7 @@ interface Harness {
   readonly ix: TestInstantiationService;
   readonly notifier: IAgentChangeNotifierService;
   readonly reminders: CapturedReminder[];
+  readonly instructionsChange: Emitter<readonly WatchChange[]>;
   readonly skillCatalogChange: Emitter<string>;
   readonly agentCatalogChange: Emitter<string>;
   readonly skillListing: { value: string };
@@ -86,6 +89,7 @@ function createHarness(options: {
   readonly profile: ProfileData;
 }): Harness {
   const reminders: CapturedReminder[] = [];
+  const instructionsChange = disposables.add(new Emitter<readonly WatchChange[]>());
   const skillCatalogChange = disposables.add(new Emitter<string>());
   const agentCatalogChange = disposables.add(new Emitter<string>());
   const skillListing = { value: '' };
@@ -110,6 +114,14 @@ function createHarness(options: {
       reg.defineInstance(IAgentProfileService, {
         data: () => options.profile,
       } as unknown as IAgentProfileService);
+      reg.defineInstance(ISessionInstructionsProvider, {
+        _serviceBrand: undefined,
+        ready: Promise.resolve(),
+        agentsMd: undefined,
+        agentsMdWarning: undefined,
+        agentsMdPaths: undefined,
+        onDidChange: instructionsChange.event,
+      } satisfies ISessionInstructionsProvider);
       reg.defineInstance(ISessionSkillCatalog, {
         _serviceBrand: undefined,
         ready: Promise.resolve(),
@@ -217,6 +229,7 @@ function createHarness(options: {
     ix,
     notifier,
     reminders,
+    instructionsChange,
     skillCatalogChange,
     agentCatalogChange,
     skillListing,
@@ -227,6 +240,12 @@ function createHarness(options: {
 
 function agentsMdPrompt(path: string, content: string): string {
   return `intro\n\n<!-- From: ${path} -->\n${content}\n\noutro`;
+}
+
+async function flushWatch(): Promise<void> {
+  for (let i = 0; i < 20; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
 }
 
 describe('notifyAgentsMdChanges', () => {
@@ -311,6 +330,79 @@ describe('notifyAgentsMdChanges', () => {
 
     await writeFile(agentsMdPath, 'v2 content');
     await h.notifier.notifyAgentsMdChanges();
+    expect(h.reminders).toHaveLength(0);
+  });
+
+  it('fires through the watch channel on an instructions change', async () => {
+    const agentsMdPath = join(workDir, 'AGENTS.md');
+    await writeFile(agentsMdPath, 'v1 content');
+    const h = createHarness({
+      profile: makeProfileData({
+        profileName: 'default',
+        systemPrompt: agentsMdPrompt(agentsMdPath, 'v1 content'),
+        agentsMdPaths: [agentsMdPath],
+      }),
+    });
+
+    await writeFile(agentsMdPath, 'v2 content');
+    h.instructionsChange.fire([{ path: agentsMdPath, action: 'modified', kind: 'file' }]);
+    await vi.waitFor(() => {
+      expect(h.reminders).toHaveLength(1);
+    });
+    expect(h.reminders[0]?.variant).toBe('agents_md_change');
+    expect(h.reminders[0]?.content).toContain(agentsMdPath);
+  });
+
+  it('does not repeat a notification the watch channel already delivered before reload', async () => {
+    const agentsMdPath = join(workDir, 'AGENTS.md');
+    await writeFile(agentsMdPath, 'v1 content');
+    const h = createHarness({
+      profile: makeProfileData({
+        profileName: 'default',
+        systemPrompt: agentsMdPrompt(agentsMdPath, 'v1 content'),
+        agentsMdPaths: [agentsMdPath],
+      }),
+    });
+
+    await writeFile(agentsMdPath, 'v2 content');
+    h.instructionsChange.fire([{ path: agentsMdPath, action: 'modified', kind: 'file' }]);
+    await vi.waitFor(() => {
+      expect(h.reminders).toHaveLength(1);
+    });
+
+    await h.notifier.notifyAgentsMdChanges();
+    expect(h.reminders).toHaveLength(1);
+  });
+
+  it('does not repeat a reload notification when the watch channel fires afterwards', async () => {
+    const agentsMdPath = join(workDir, 'AGENTS.md');
+    await writeFile(agentsMdPath, 'v1 content');
+    const h = createHarness({
+      profile: makeProfileData({
+        profileName: 'default',
+        systemPrompt: agentsMdPrompt(agentsMdPath, 'v1 content'),
+        agentsMdPaths: [agentsMdPath],
+      }),
+    });
+
+    await writeFile(agentsMdPath, 'v2 content');
+    await h.notifier.notifyAgentsMdChanges();
+    expect(h.reminders).toHaveLength(1);
+
+    h.instructionsChange.fire([{ path: agentsMdPath, action: 'modified', kind: 'file' }]);
+    await flushWatch();
+    expect(h.reminders).toHaveLength(1);
+  });
+
+  it('stays silent on a watch event when the profile is not bound yet', async () => {
+    const agentsMdPath = join(workDir, 'AGENTS.md');
+    await writeFile(agentsMdPath, 'v1 content');
+    const h = createHarness({
+      profile: makeProfileData({ profileName: undefined }),
+    });
+
+    h.instructionsChange.fire([{ path: agentsMdPath, action: 'modified', kind: 'file' }]);
+    await flushWatch();
     expect(h.reminders).toHaveLength(0);
   });
 });

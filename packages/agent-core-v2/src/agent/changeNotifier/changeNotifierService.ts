@@ -15,6 +15,7 @@ import { IAgentStateService } from '#/agent/state/agentState';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentRuntimeService } from '#/agent/runtimeBinding/agentRuntime';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import { ISessionInstructionsProvider } from '#/session/sessionInstructions/instructionsProvider';
 import { ISessionSkillCatalog } from '#/features/skill/session/skillCatalog';
 import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
 import { MAIN_AGENT_ID } from '#/session/agentLifecycle/agentLifecycle';
@@ -57,12 +58,18 @@ export class AgentChangeNotifierService extends Disposable implements IAgentChan
     @IAgentRuntimeService private readonly runtime: IAgentRuntimeService,
     @IConfigService private readonly config: IConfigService,
     @ISessionContext private readonly sessionContext: ISessionContext,
+    @ISessionInstructionsProvider private readonly instructions: ISessionInstructionsProvider,
     @IBootstrapService private readonly bootstrap: IBootstrapService,
     @IEventDispatcher private readonly dispatcher: IEventDispatcher,
     @ILogService private readonly log: ILogService,
   ) {
     super();
     this.states.contributeState(changeNotifierSnapshotKey);
+    this._register(
+      this.instructions.onDidChange(() => {
+        void this.notifyAgentsMdChanges();
+      }),
+    );
     this._register(
       this.skillCatalog.onDidChange(() => {
         void this.notifySkillChanges();
