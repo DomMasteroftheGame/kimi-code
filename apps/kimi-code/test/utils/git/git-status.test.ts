@@ -329,10 +329,10 @@ describe('git status cache', () => {
     cache.dispose();
   });
 
-  it('stops the walk-up at GIT_CEILING_DIRECTORIES', async () => {
+  it('rejects a repository rooted exactly at a ceiling when starting below it', async () => {
     const repoRoot = resolve('/virtual');
     writeRepo(repoRoot, 'ref: refs/heads/parent\n');
-    process.env['GIT_CEILING_DIRECTORIES'] = workDir;
+    process.env['GIT_CEILING_DIRECTORIES'] = repoRoot;
 
     const cache = createGitStatusCache(workDir);
     await flushMicrotasks();
@@ -342,7 +342,19 @@ describe('git status cache', () => {
     cache.dispose();
   });
 
-  it('still checks the ceiling directory itself for a repository', async () => {
+  it('discovers a repository above the work directory when the ceiling is the work directory itself', async () => {
+    const repoRoot = resolve('/virtual');
+    writeRepo(repoRoot, 'ref: refs/heads/parent\n');
+    process.env['GIT_CEILING_DIRECTORIES'] = workDir;
+
+    const cache = createGitStatusCache(workDir);
+    await flushMicrotasks();
+
+    expect(cache.getStatus()?.branch).toBe('parent');
+    cache.dispose();
+  });
+
+  it('still checks the starting directory itself when it is a ceiling', async () => {
     writeRepo(workDir);
     process.env['GIT_CEILING_DIRECTORIES'] = workDir;
 
@@ -350,6 +362,18 @@ describe('git status cache', () => {
     await flushMicrotasks();
 
     expect(cache.getStatus()?.branch).toBe('main');
+    cache.dispose();
+  });
+
+  it('treats an explicitly empty GIT_DIR as no repository', async () => {
+    writeRepo(workDir);
+    process.env['GIT_DIR'] = '';
+
+    const cache = createGitStatusCache(workDir);
+    await flushMicrotasks();
+
+    expect(cache.getStatus()).toBeNull();
+    expect(mocks.chokidarWatch).not.toHaveBeenCalled();
     cache.dispose();
   });
 
@@ -452,7 +476,7 @@ describe('git status cache', () => {
       content: 'ref: refs/heads/env-selected\n',
     });
     process.env['GIT_DIR'] = gitDir;
-    process.env['GIT_CEILING_DIRECTORIES'] = workDir;
+    process.env['GIT_CEILING_DIRECTORIES'] = resolve('/virtual');
 
     const cache = createGitStatusCache(workDir);
     await flushMicrotasks();

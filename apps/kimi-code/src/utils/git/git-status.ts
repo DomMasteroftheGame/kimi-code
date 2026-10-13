@@ -321,7 +321,8 @@ interface RepoLocation {
 
 async function findRepo(workDir: string): Promise<RepoLocation | null> {
   const envGitDir = process.env['GIT_DIR'];
-  if (envGitDir !== undefined && envGitDir.trim().length > 0) {
+  if (envGitDir !== undefined) {
+    if (envGitDir.trim().length === 0) return null;
     const gitDir = isAbsolute(envGitDir) ? envGitDir : resolve(workDir, envGitDir);
     const headPath = join(gitDir, 'HEAD');
     const branch = await readHeadBranch(headPath);
@@ -346,9 +347,9 @@ async function findRepo(workDir: string): Promise<RepoLocation | null> {
       const branch = await readHeadBranch(headPath);
       return branch === null ? null : { headPath, branch };
     }
-    if (ceilings.has(normalizeForComparison(dir))) return null;
     const parent = dirname(dir);
     if (parent === dir) return null;
+    if (ceilings.has(normalizeForComparison(parent))) return null;
     if (!crossFilesystem) {
       const parentDevice = (await tryStat(parent))?.dev;
       if (device !== undefined && parentDevice !== undefined && parentDevice !== device) {
