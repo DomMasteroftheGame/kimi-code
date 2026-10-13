@@ -70,7 +70,7 @@ export function createGitStatusCache(
   options: GitStatusCacheOptions = {},
 ): GitStatusCache {
   const git = resolveCommandPath('git', workDir);
-  const gh = resolveCommandPath('gh', workDir);
+  let gh = resolveCommandPath('gh', workDir);
   let repo: RepoState | null = null;
   let watcher: FSWatcher | null = null;
   let probeInFlight = false;
@@ -289,6 +289,7 @@ export function createGitStatusCache(
       requestId,
     };
 
+    if (gh === undefined) gh = resolveCommandPath('gh', workDir);
     void readPullRequest(gh, workDir).then((value) => {
       if (disposed || pullRequest.requestId !== requestId) return;
 

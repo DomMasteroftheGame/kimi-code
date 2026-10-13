@@ -477,6 +477,35 @@ describe('git status cache', () => {
     cache.dispose();
   });
 
+  it('re-resolves gh when it was unavailable at startup', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-24T00:00:00Z'));
+    let ghLookups = 0;
+    mocks.resolveCommandPath.mockImplementation((command: string) =>
+      command === 'git' ? '/usr/bin/git' : ghLookups++ < 2 ? undefined : '/usr/bin/gh',
+    );
+    writeRepo(workDir);
+    const cache = createGitStatusCache(workDir);
+    await flushMicrotasks();
+
+    cache.getStatus();
+    expect(pendingGh).toHaveLength(0);
+    await answerGitRound('## main...origin/main\n');
+    expect(cache.getStatus()?.pullRequest).toBeNull();
+
+    vi.setSystemTime(new Date('2026-04-24T00:01:01Z'));
+    cache.getStatus();
+    expect(pendingGh).toHaveLength(1);
+    answerGh('{"number":7,"url":"https://github.com/acme/repo/pull/7"}\n');
+    await flushMicrotasks();
+
+    expect(cache.getStatus()?.pullRequest).toEqual({
+      number: 7,
+      url: 'https://github.com/acme/repo/pull/7',
+    });
+    cache.dispose();
+  });
+
   it('reads current pull request metadata and notifies on change', async () => {
     writeRepo(workDir, 'ref: refs/heads/feature/footer\n');
     const onChange = vi.fn();
