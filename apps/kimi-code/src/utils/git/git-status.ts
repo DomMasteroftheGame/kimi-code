@@ -289,8 +289,12 @@ export function createGitStatusCache(
       requestId,
     };
 
-    if (gh === undefined) gh = resolveCommandPath('gh', workDir);
-    void readPullRequest(gh, workDir).then((value) => {
+    void Promise.resolve()
+      .then(() => {
+        if (gh === undefined) gh = resolveCommandPath('gh', workDir);
+        return readPullRequest(gh, workDir);
+      })
+      .then((value) => {
       if (disposed || pullRequest.requestId !== requestId) return;
 
       const previous = pullRequest.branch === branchName ? pullRequest.value : null;
@@ -348,7 +352,10 @@ function ceilingDirectories(): ReadonlySet<string> {
   const raw = process.env['GIT_CEILING_DIRECTORIES'];
   if (raw === undefined) return new Set();
   const separator = process.platform === 'win32' ? ';' : ':';
-  const entries = raw.split(separator).filter((entry) => entry.trim().length > 0);
+  const entries = raw
+    .split(separator)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0 && isAbsolute(entry));
   return new Set(entries.map(normalizeForComparison));
 }
 

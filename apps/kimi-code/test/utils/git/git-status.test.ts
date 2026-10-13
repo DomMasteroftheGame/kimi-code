@@ -338,6 +338,22 @@ describe('git status cache', () => {
     cache.dispose();
   });
 
+  it('lets GIT_DIR win even when a ceiling would block discovery', async () => {
+    const gitDir = resolve('/virtual/env-gitdir');
+    fakeFiles.set(join(gitDir, 'HEAD'), {
+      type: 'file',
+      content: 'ref: refs/heads/env-selected\n',
+    });
+    process.env['GIT_DIR'] = gitDir;
+    process.env['GIT_CEILING_DIRECTORIES'] = workDir;
+
+    const cache = createGitStatusCache(workDir);
+    await flushMicrotasks();
+
+    expect(cache.getStatus()?.branch).toBe('env-selected');
+    cache.dispose();
+  });
+
   it('resolves a relative gitdir pointer file with a BOM', async () => {
     const gitDir = join(workDir, 'real-git');
     fakeFiles.set(join(gitDir, 'HEAD'), { type: 'file', content: 'ref: refs/heads/worktree\n' });
@@ -528,6 +544,7 @@ describe('git status cache', () => {
 
     vi.setSystemTime(new Date('2026-04-24T00:01:01Z'));
     cache.getStatus();
+    await flushMicrotasks();
     expect(pendingGh).toHaveLength(1);
     answerGh('{"number":7,"url":"https://github.com/acme/repo/pull/7"}\n');
     await flushMicrotasks();
@@ -536,6 +553,12 @@ describe('git status cache', () => {
       number: 7,
       url: 'https://github.com/acme/repo/pull/7',
     });
+
+    const lookupsAfterSuccess = ghLookups;
+    vi.setSystemTime(new Date('2026-04-24T00:02:02Z'));
+    cache.getStatus();
+    await flushMicrotasks();
+    expect(ghLookups).toBe(lookupsAfterSuccess);
     cache.dispose();
   });
 
@@ -548,6 +571,7 @@ describe('git status cache', () => {
 
     expect(cache.getStatus()?.pullRequest).toBeNull();
     cache.getStatus();
+    await flushMicrotasks();
     answerGh('{"number":12,"url":"https://github.com/acme/repo/pull/12"}\n');
     await answerGitRound(
       '## feature/footer...origin/feature/footer\n M src/app.ts\n',
