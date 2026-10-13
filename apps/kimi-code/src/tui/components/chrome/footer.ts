@@ -229,6 +229,7 @@ export class FooterComponent implements Component {
   setState(state: AppState): void {
     if (state.workDir !== this.gitCacheWorkDir) {
       this.gitCacheWorkDir = state.workDir;
+      this.gitCache.dispose();
       this.gitCache = createGitStatusCache(state.workDir, {
         onChange: this.onRefresh,
       });
@@ -542,11 +543,16 @@ export class FooterComponent implements Component {
     }
   }
 
+  refreshGitStatus(): void {
+    this.gitCache.refresh();
+  }
+
   dispose(): void {
     if (this.goalTimer !== null) {
       clearInterval(this.goalTimer);
       this.goalTimer = null;
     }
+    this.gitCache.dispose();
   }
 
   private goalWallClockMs(goal: AppState['goal']): number | undefined {

@@ -1,18 +1,14 @@
-/**
- * Cached git branch + working-tree status for the footer/statusline.
- *
- * Branch name refreshes every 5s, porcelain status every 15s. Branch
- * and status reads stay synchronous with short timeouts. Pull request
- * lookup uses an async cache so a slow `gh pr view` never blocks
- * footer rendering.
- */
+import { execFile } from 'node:child_process';
+import { readFileSync, statSync, type Stats } from 'node:fs';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 
-import { execFile, spawnSync } from 'node:child_process';
+import { watch, type FSWatcher } from 'chokidar';
 
 import { resolveCommandPath } from '#/utils/process/resolve-command';
 
-const BRANCH_TTL_MS = 5_000;
-const STATUS_TTL_MS = 15_000;
+const STATUS_TTL_MS = 30_000;
+const HEAD_POLL_INTERVAL_MS = 1_000;
+const STATS_REFRESH_DEBOUNCE_MS = 1_000;
 const PULL_REQUEST_TTL_MS = 60_000;
 const SPAWN_TIMEOUT_MS = 500;
 const PR_SPAWN_TIMEOUT_MS = 5_000;
@@ -33,26 +29,27 @@ export interface PullRequestInfo {
 }
 
 export interface GitStatusCache {
-  /** Returns current status, or `null` when workDir is not a git repo. */
   getStatus(): GitStatus | null;
+  refresh(): void;
+  dispose(): void;
 }
 
 export interface GitStatusCacheOptions {
   readonly onChange?: () => void;
 }
 
-interface BranchState {
-  value: string | null;
-  fetchedAt: number;
-}
-
-interface StatusState {
+interface StatsState {
   dirty: boolean;
   ahead: number;
   behind: number;
   diffAdded: number;
   diffDeleted: number;
   fetchedAt: number;
+}
+
+interface RepoState {
+  readonly headPath: string;
+  branch: string;
 }
 
 interface PullRequestState {
@@ -64,18 +61,18 @@ interface PullRequestState {
 }
 
 const AHEAD_BEHIND_RE = /\[(?:ahead (\d+))?(?:, )?(?:behind (\d+))?\]/;
+const HEAD_REF_PREFIX = 'ref: refs/heads/';
+const DETACHED_HEAD_RE = /^[0-9a-f]{40}$/i;
 
 export function createGitStatusCache(
   workDir: string,
   options: GitStatusCacheOptions = {},
 ): GitStatusCache {
-  // Resolve through PATH to an absolute path — a bare name would let cmd.exe
-  // pick up a `git.exe` planted in the workspace.
   const git = resolveCommandPath('git', workDir);
-  let repoDetected = false;
-  let isRepo = false;
-  let branch: BranchState = { value: null, fetchedAt: 0 };
-  let status: StatusState = {
+  let repo: RepoState | null = null;
+  let watcher: FSWatcher | null = null;
+  let nonRepoProbedAt = 0;
+  let stats: StatsState = {
     dirty: false,
     ahead: 0,
     behind: 0,
@@ -90,39 +87,164 @@ export function createGitStatusCache(
     pendingBranch: null,
     requestId: 0,
   };
+  let statsRefreshRunning = false;
+  let statsRefreshPending = false;
+  let statsDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  let branchRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  let disposed = false;
+
+  probe();
 
   return {
     getStatus: () => {
-      if (git === undefined) return null;
-      if (repoDetected && !isRepo) return null;
-      if (!repoDetected) {
-        repoDetected = true;
-        isRepo = detectGitRepo(git, workDir);
-      }
-      if (!isRepo) return null;
-
+      if (disposed) return null;
       const now = Date.now();
-      if (now - branch.fetchedAt >= BRANCH_TTL_MS) {
-        branch = { value: readBranch(git, workDir), fetchedAt: now };
+      if (repo === null) {
+        if (now - nonRepoProbedAt < STATUS_TTL_MS) return null;
+        probe();
+        if (repo === null) return null;
       }
-      if (branch.value === null) return null;
-
-      if (now - status.fetchedAt >= STATUS_TTL_MS) {
-        status = { ...readStatus(git, workDir), fetchedAt: now };
-      }
-      refreshPullRequestIfNeeded(branch.value, now);
-
+      if (now - stats.fetchedAt >= STATUS_TTL_MS) requestStatsRefresh();
+      refreshPullRequestIfNeeded(repo.branch, now);
       return {
-        branch: branch.value,
-        dirty: status.dirty,
-        ahead: status.ahead,
-        behind: status.behind,
-        diffAdded: status.diffAdded,
-        diffDeleted: status.diffDeleted,
-        pullRequest: pullRequest.branch === branch.value ? pullRequest.value : null,
+        branch: repo.branch,
+        dirty: stats.dirty,
+        ahead: stats.ahead,
+        behind: stats.behind,
+        diffAdded: stats.diffAdded,
+        diffDeleted: stats.diffDeleted,
+        pullRequest: pullRequest.branch === repo.branch ? pullRequest.value : null,
       };
     },
+    refresh: () => {
+      requestStatsRefresh();
+    },
+    dispose: () => {
+      if (disposed) return;
+      disposed = true;
+      if (statsDebounceTimer !== null) {
+        clearTimeout(statsDebounceTimer);
+        statsDebounceTimer = null;
+      }
+      if (branchRetryTimer !== null) {
+        clearTimeout(branchRetryTimer);
+        branchRetryTimer = null;
+      }
+      closeWatcher();
+    },
   };
+
+  function probe(): void {
+    const found = findRepo(workDir);
+    if (found === null) {
+      nonRepoProbedAt = Date.now();
+      return;
+    }
+    repo = { headPath: found.headPath, branch: found.branch };
+    stats = { dirty: false, ahead: 0, behind: 0, diffAdded: 0, diffDeleted: 0, fetchedAt: 0 };
+    try {
+      watcher = watch(found.headPath, {
+        usePolling: true,
+        interval: HEAD_POLL_INTERVAL_MS,
+        ignoreInitial: true,
+        persistent: false,
+      });
+      watcher.on('change', onHeadEvent);
+      watcher.on('unlink', onHeadEvent);
+      watcher.on('error', onHeadEvent);
+    } catch {
+      watcher = null;
+    }
+  }
+
+  function becomeNonRepo(): void {
+    repo = null;
+    nonRepoProbedAt = Date.now();
+    closeWatcher();
+  }
+
+  function closeWatcher(): void {
+    const current = watcher;
+    watcher = null;
+    if (current !== null) void current.close().catch(() => undefined);
+  }
+
+  function onHeadEvent(): void {
+    if (disposed || repo === null) return;
+    const branch = readHeadBranch(repo.headPath);
+    if (branch === null) {
+      if (pathMissing(repo.headPath)) {
+        becomeNonRepo();
+        options.onChange?.();
+      } else {
+        scheduleBranchRetry();
+      }
+      return;
+    }
+    if (branch !== repo.branch) {
+      repo.branch = branch;
+      options.onChange?.();
+    }
+    scheduleStatsRefresh();
+  }
+
+  function scheduleBranchRetry(): void {
+    if (branchRetryTimer !== null) return;
+    branchRetryTimer = setTimeout(() => {
+      branchRetryTimer = null;
+      if (disposed || repo === null) return;
+      const branch = readHeadBranch(repo.headPath);
+      if (branch === null) {
+        if (pathMissing(repo.headPath)) {
+          becomeNonRepo();
+          options.onChange?.();
+        }
+        return;
+      }
+      if (branch !== repo.branch) {
+        repo.branch = branch;
+        options.onChange?.();
+      }
+      requestStatsRefresh();
+    }, HEAD_POLL_INTERVAL_MS);
+    branchRetryTimer.unref?.();
+  }
+
+  function scheduleStatsRefresh(): void {
+    if (statsDebounceTimer !== null) clearTimeout(statsDebounceTimer);
+    statsDebounceTimer = setTimeout(() => {
+      statsDebounceTimer = null;
+      requestStatsRefresh();
+    }, STATS_REFRESH_DEBOUNCE_MS);
+    statsDebounceTimer.unref?.();
+  }
+
+  function requestStatsRefresh(): void {
+    if (disposed || repo === null || git === undefined) return;
+    if (statsRefreshRunning) {
+      statsRefreshPending = true;
+      return;
+    }
+    statsRefreshRunning = true;
+    stats = { ...stats, fetchedAt: Date.now() };
+    void runStatsRefresh(git);
+  }
+
+  async function runStatsRefresh(resolvedGit: string): Promise<void> {
+    try {
+      const next = await readStats(resolvedGit, workDir);
+      if (!disposed && repo !== null && next !== null && !sameStats(stats, next)) {
+        stats = { ...next, fetchedAt: Date.now() };
+        options.onChange?.();
+      }
+    } finally {
+      statsRefreshRunning = false;
+      if (statsRefreshPending && !disposed) {
+        statsRefreshPending = false;
+        requestStatsRefresh();
+      }
+    }
+  }
 
   function refreshPullRequestIfNeeded(branchName: string, now: number): void {
     if (pullRequest.pendingBranch === branchName) return;
@@ -139,7 +261,7 @@ export function createGitStatusCache(
     };
 
     void readPullRequest(workDir).then((value) => {
-      if (pullRequest.requestId !== requestId) return;
+      if (disposed || pullRequest.requestId !== requestId) return;
 
       const previous = pullRequest.branch === branchName ? pullRequest.value : null;
       const changed = !samePullRequest(previous, value);
@@ -155,100 +277,164 @@ export function createGitStatusCache(
   }
 }
 
-function detectGitRepo(git: string, workDir: string): boolean {
-  try {
-    const result = spawnSync(git, ['-C', workDir, 'rev-parse', '--is-inside-work-tree'], {
-      encoding: 'utf8',
-      timeout: SPAWN_TIMEOUT_MS,
-    });
-    return result.status === 0 && result.stdout.trim() === 'true';
-  } catch {
-    return false;
+interface RepoLocation {
+  readonly headPath: string;
+  readonly branch: string;
+}
+
+function findRepo(workDir: string): RepoLocation | null {
+  let dir = resolve(workDir);
+  for (;;) {
+    const dotGit = join(dir, '.git');
+    const stat = tryStat(dotGit);
+    if (stat !== null) {
+      const gitDir = stat.isDirectory()
+        ? dotGit
+        : stat.isFile()
+          ? readGitdirPointer(dotGit, dir)
+          : null;
+      if (gitDir === null) return null;
+      const headPath = join(gitDir, 'HEAD');
+      const branch = readHeadBranch(headPath);
+      return branch === null ? null : { headPath, branch };
+    }
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
   }
 }
 
-function readBranch(git: string, workDir: string): string | null {
+function tryStat(path: string): Stats | null {
   try {
-    const result = spawnSync(git, ['-C', workDir, 'branch', '--show-current'], {
-      encoding: 'utf8',
-      timeout: SPAWN_TIMEOUT_MS,
-    });
-    if (result.status !== 0) return null;
-    const name = result.stdout.trim();
-    return name.length > 0 ? name : null;
+    return statSync(path);
   } catch {
     return null;
   }
 }
 
-function readStatus(
-  git: string,
-  workDir: string,
-): {
+function pathMissing(path: string): boolean {
+  try {
+    statSync(path);
+    return false;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === 'ENOENT' || code === 'ENOTDIR';
+  }
+}
+
+function readGitdirPointer(dotGit: string, dir: string): string | null {
+  let content: string;
+  try {
+    content = readFileSync(dotGit, 'utf8');
+  } catch {
+    return null;
+  }
+  const text = content.replace(/^\uFEFF/, '').trim();
+  if (!text.startsWith('gitdir:')) return null;
+  const target = text.slice('gitdir:'.length).trim();
+  if (target.length === 0) return null;
+  return isAbsolute(target) ? target : resolve(dir, target);
+}
+
+function readHeadBranch(headPath: string): string | null {
+  let content: string;
+  try {
+    content = readFileSync(headPath, 'utf8');
+  } catch {
+    return null;
+  }
+  const text = content.replace(/^\uFEFF/, '').trim();
+  if (text.startsWith(HEAD_REF_PREFIX)) {
+    const name = text.slice(HEAD_REF_PREFIX.length).trim();
+    return name.length > 0 ? name : null;
+  }
+  if (DETACHED_HEAD_RE.test(text)) return text.slice(0, 7);
+  return null;
+}
+
+interface StatsData {
   dirty: boolean;
   ahead: number;
   behind: number;
   diffAdded: number;
   diffDeleted: number;
-} {
-  try {
-    const result = spawnSync(git, ['-C', workDir, 'status', '--porcelain', '-b'], {
-      encoding: 'utf8',
-      timeout: SPAWN_TIMEOUT_MS,
-      maxBuffer: 4 * 1024 * 1024,
-    });
-    if (result.status !== 0) {
-      return { dirty: false, ahead: 0, behind: 0, diffAdded: 0, diffDeleted: 0 };
-    }
-
-    let dirty = false;
-    let ahead = 0;
-    let behind = 0;
-    for (const line of result.stdout.split('\n')) {
-      if (line.startsWith('## ')) {
-        const m = AHEAD_BEHIND_RE.exec(line);
-        if (m) {
-          ahead = Number.parseInt(m[1] ?? '0', 10) || 0;
-          behind = Number.parseInt(m[2] ?? '0', 10) || 0;
-        }
-      } else if (line.trim().length > 0) {
-        dirty = true;
-      }
-    }
-    const diff = dirty ? readDiffStats(git, workDir) : { added: 0, deleted: 0 };
-    return {
-      dirty,
-      ahead,
-      behind,
-      diffAdded: diff.added,
-      diffDeleted: diff.deleted,
-    };
-  } catch {
-    return { dirty: false, ahead: 0, behind: 0, diffAdded: 0, diffDeleted: 0 };
-  }
 }
 
-function readDiffStats(git: string, workDir: string): { added: number; deleted: number } {
-  try {
-    const result = spawnSync(git, ['-C', workDir, 'diff', '--numstat', 'HEAD', '--'], {
-      encoding: 'utf8',
-      timeout: SPAWN_TIMEOUT_MS,
-      maxBuffer: 4 * 1024 * 1024,
-    });
-    if (result.status !== 0) return { added: 0, deleted: 0 };
+async function readStats(git: string, workDir: string): Promise<StatsData | null> {
+  const statusOut = await execGit(git, [
+    '--no-optional-locks',
+    '-C',
+    workDir,
+    'status',
+    '--porcelain',
+    '-b',
+  ]);
+  if (statusOut === null) return null;
 
-    let added = 0;
-    let deleted = 0;
-    for (const line of result.stdout.split('\n')) {
-      if (!line) continue;
-      const [addedText, deletedText] = line.split('\t');
-      added += parseDiffNumstatCount(addedText);
-      deleted += parseDiffNumstatCount(deletedText);
+  let dirty = false;
+  let ahead = 0;
+  let behind = 0;
+  for (const line of statusOut.split('\n')) {
+    if (line.startsWith('## ')) {
+      const m = AHEAD_BEHIND_RE.exec(line);
+      if (m) {
+        ahead = Number.parseInt(m[1] ?? '0', 10) || 0;
+        behind = Number.parseInt(m[2] ?? '0', 10) || 0;
+      }
+    } else if (line.trim().length > 0) {
+      dirty = true;
     }
-    return { added, deleted };
-  } catch {
-    return { added: 0, deleted: 0 };
   }
+
+  let diffAdded = 0;
+  let diffDeleted = 0;
+  if (dirty) {
+    const diffOut = await execGit(git, [
+      '--no-optional-locks',
+      '-C',
+      workDir,
+      'diff',
+      '--numstat',
+      'HEAD',
+      '--',
+    ]);
+    if (diffOut !== null) {
+      for (const line of diffOut.split('\n')) {
+        if (!line) continue;
+        const [addedText, deletedText] = line.split('\t');
+        diffAdded += parseDiffNumstatCount(addedText);
+        diffDeleted += parseDiffNumstatCount(deletedText);
+      }
+    }
+  }
+  return { dirty, ahead, behind, diffAdded, diffDeleted };
+}
+
+function execGit(git: string, args: string[]): Promise<string | null> {
+  return new Promise((resolvePromise) => {
+    try {
+      execFile(
+        git,
+        args,
+        { encoding: 'utf8', timeout: SPAWN_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
+        (error, stdout) => {
+          resolvePromise(error === null ? stdout : null);
+        },
+      );
+    } catch {
+      resolvePromise(null);
+    }
+  });
+}
+
+function sameStats(a: StatsData, b: StatsData): boolean {
+  return (
+    a.dirty === b.dirty &&
+    a.ahead === b.ahead &&
+    a.behind === b.behind &&
+    a.diffAdded === b.diffAdded &&
+    a.diffDeleted === b.diffDeleted
+  );
 }
 
 function parseDiffNumstatCount(value: string | undefined): number {
@@ -258,12 +444,10 @@ function parseDiffNumstatCount(value: string | undefined): number {
 }
 
 function readPullRequest(workDir: string): Promise<PullRequestInfo | null> {
-  return new Promise((resolve) => {
-    // Resolve gh through PATH as well — this runs with cwd = workDir, where a
-    // planted `gh.exe` would otherwise be picked up by cmd.exe on Windows.
+  return new Promise((resolvePromise) => {
     const gh = resolveCommandPath('gh', workDir);
     if (gh === undefined) {
-      resolve(null);
+      resolvePromise(null);
       return;
     }
     try {
@@ -283,14 +467,14 @@ function readPullRequest(workDir: string): Promise<PullRequestInfo | null> {
         },
         (error, stdout) => {
           if (error !== null) {
-            resolve(null);
+            resolvePromise(null);
             return;
           }
-          resolve(parsePullRequest(stdout));
+          resolvePromise(parsePullRequest(stdout));
         },
       );
     } catch {
-      resolve(null);
+      resolvePromise(null);
     }
   });
 }

@@ -20,6 +20,8 @@ beforeEach(() => {
   gitStatusMocks.createGitStatusCache.mockClear();
   gitStatusMocks.createGitStatusCache.mockImplementation(() => ({
     getStatus: vi.fn(() => null),
+    refresh: vi.fn(),
+    dispose: vi.fn(),
   }));
 });
 
