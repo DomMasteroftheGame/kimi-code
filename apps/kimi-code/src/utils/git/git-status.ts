@@ -322,8 +322,8 @@ export function createGitStatusCache(
       }
       return;
     }
-    if (disposed || repo !== current) return;
     closeWatcher();
+    if (disposed || repo !== current) return;
     invalidatePullRequest();
     current.headPath = headPath;
     startWatcher(headPath);
@@ -390,7 +390,6 @@ async function findRepo(workDir: string): Promise<RepoLocation | null> {
 
   const ceilings = await ceilingDirectories();
   const crossFilesystem = discoveryAcrossFilesystem();
-  if (crossFilesystem === 'invalid') return null;
   let dir = await physicalDir(workDir);
   let device = (await tryStat(dir))?.dev;
   for (;;) {
@@ -425,14 +424,13 @@ async function findRepo(workDir: string): Promise<RepoLocation | null> {
   }
 }
 
-function discoveryAcrossFilesystem(): boolean | 'invalid' {
-  const raw = process.env['GIT_DISCOVERY_ACROSS_FILESYSTEM'];
+function discoveryAcrossFilesystem(): boolean {
+  const raw = process.env['GIT_DISCOVERY_ACROSS_FILESYSTEM']?.trim().toLowerCase();
   if (raw === undefined || raw === '') return false;
-  const normalized = raw.toLowerCase();
-  if (normalized === 'true' || normalized === 'yes' || normalized === 'on') return true;
-  if (normalized === 'false' || normalized === 'no' || normalized === 'off') return false;
-  if (/^[+-]?\d+$/.test(raw)) return Number(raw) !== 0;
-  return 'invalid';
+  if (raw === 'true' || raw === 'yes' || raw === 'on') return true;
+  if (raw === 'false' || raw === 'no' || raw === 'off') return false;
+  const numeric = Number(raw);
+  return Number.isFinite(numeric) && numeric !== 0;
 }
 
 async function ceilingDirectories(): Promise<ReadonlySet<string>> {
@@ -488,8 +486,6 @@ const GITFILE_READ_LIMIT_BYTES = 4 * 1024;
 async function readBoundedUtf8(path: string): Promise<string | null> {
   let handle: FileHandle | null = null;
   try {
-    const fileStat = await stat(path);
-    if (!fileStat.isFile()) return null;
     handle = await open(path, 'r');
     const buffer = Buffer.alloc(GITFILE_READ_LIMIT_BYTES + 1);
     const { bytesRead } = await handle.read(buffer, 0, GITFILE_READ_LIMIT_BYTES + 1, 0);
