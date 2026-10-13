@@ -365,6 +365,23 @@ describe('git status cache', () => {
     cache.dispose();
   });
 
+  it('resolves symlinked ceiling entries before comparison', async () => {
+    const link = resolve('/virtual/link');
+    const physical = resolve('/virtual');
+    writeRepo(physical, 'ref: refs/heads/parent\n');
+    process.env['GIT_CEILING_DIRECTORIES'] = link;
+    mocks.fsRealpath.mockImplementation((path: string) =>
+      Promise.resolve(path === link ? physical : path),
+    );
+
+    const cache = createGitStatusCache(workDir);
+    await flushMicrotasks();
+
+    expect(cache.getStatus()).toBeNull();
+    expect(mocks.chokidarWatch).not.toHaveBeenCalled();
+    cache.dispose();
+  });
+
   it('treats an explicitly empty GIT_DIR as no repository', async () => {
     writeRepo(workDir);
     process.env['GIT_DIR'] = '';

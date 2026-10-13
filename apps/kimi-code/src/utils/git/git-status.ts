@@ -329,7 +329,7 @@ async function findRepo(workDir: string): Promise<RepoLocation | null> {
     return branch === null ? null : { headPath, branch };
   }
 
-  const ceilings = ceilingDirectories();
+  const ceilings = await ceilingDirectories();
   const crossFilesystem = discoveryAcrossFilesystem();
   let dir = await physicalDir(workDir);
   let device = (await tryStat(dir))?.dev;
@@ -366,7 +366,7 @@ function discoveryAcrossFilesystem(): boolean {
   return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
 }
 
-function ceilingDirectories(): ReadonlySet<string> {
+async function ceilingDirectories(): Promise<ReadonlySet<string>> {
   const raw = process.env['GIT_CEILING_DIRECTORIES'];
   if (raw === undefined) return new Set();
   const separator = process.platform === 'win32' ? ';' : ':';
@@ -374,7 +374,16 @@ function ceilingDirectories(): ReadonlySet<string> {
     .split(separator)
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0 && isAbsolute(entry));
-  return new Set(entries.map(normalizeForComparison));
+  const normalized = await Promise.all(
+    entries.map(async (entry) => {
+      try {
+        return normalizeForComparison(await realpath(entry));
+      } catch {
+        return normalizeForComparison(entry);
+      }
+    }),
+  );
+  return new Set(normalized);
 }
 
 function normalizeForComparison(path: string): string {
