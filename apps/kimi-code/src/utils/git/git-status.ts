@@ -430,7 +430,7 @@ function discoveryAcrossFilesystem(): boolean {
   const normalized = raw.toLowerCase();
   if (normalized === 'true' || normalized === 'yes' || normalized === 'on') return true;
   if (normalized === 'false' || normalized === 'no' || normalized === 'off') return false;
-  return /^-?\d+$/.test(raw) && Number(raw) !== 0;
+  return /^[+-]?\d+$/.test(raw) && Number(raw) !== 0;
 }
 
 async function ceilingDirectories(): Promise<ReadonlySet<string>> {

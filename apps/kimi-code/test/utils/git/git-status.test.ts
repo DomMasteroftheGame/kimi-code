@@ -469,7 +469,7 @@ describe('git status cache', () => {
     fakeFiles.set(resolve('/virtual'), { type: 'dir', dev: 1 });
     fakeFiles.set(root, { type: 'dir', dev: 2 });
     writeRepo(root, 'ref: refs/heads/other-device\n');
-    process.env['GIT_DISCOVERY_ACROSS_FILESYSTEM'] = '2';
+    process.env['GIT_DISCOVERY_ACROSS_FILESYSTEM'] = '+2';
 
     const cache = createGitStatusCache(workDir);
     await flushMicrotasks();
