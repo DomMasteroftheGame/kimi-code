@@ -556,6 +556,100 @@ describe('git status cache', () => {
     cache.dispose();
   });
 
+  it('follows a relative GIT_DIR when the workDir symlink is retargeted', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-24T00:00:00Z'));
+    const repoA = resolve('/virtual/repo-a');
+    const repoB = resolve('/virtual/repo-b');
+    fakeFiles.set(join(repoA, 'admin', 'HEAD'), {
+      type: 'file',
+      content: 'ref: refs/heads/alpha\n',
+    });
+    fakeFiles.set(join(repoB, 'admin', 'HEAD'), {
+      type: 'file',
+      content: 'ref: refs/heads/beta\n',
+    });
+    const linked = resolve('/virtual/project');
+    let target = repoA;
+    mocks.fsRealpath.mockImplementation((path: string) =>
+      Promise.resolve(path === linked ? target : path),
+    );
+    process.env['GIT_DIR'] = 'admin';
+
+    const onChange = vi.fn();
+    const cache = createGitStatusCache(linked, { onChange });
+    await flushMicrotasks();
+    expect(cache.getStatus()?.branch).toBe('alpha');
+
+    target = repoB;
+    onChange.mockClear();
+    cache.refresh();
+    await flushMicrotasks();
+
+    expect(cache.getStatus()?.branch).toBe('beta');
+    expect(onChange).toHaveBeenCalled();
+    cache.dispose();
+  });
+
+  it('re-resolves gh when the cached executable fails to spawn', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-24T00:00:00Z'));
+    let ghLookups = 0;
+    mocks.resolveCommandPath.mockImplementation((command: string) =>
+      command === 'git' ? '/usr/bin/git' : ghLookups++ === 0 ? '/usr/bin/gh-old' : '/usr/bin/gh-new',
+    );
+    mocks.execFile.mockImplementation(
+      (cmd: string, args: string[], _options: unknown, callback: ExecCallback) => {
+        if (cmd === '/usr/bin/git') pendingGit.push({ args, callback });
+        else if (cmd === '/usr/bin/gh-old') {
+          callback(Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' }), '', '');
+        } else pendingGh.push({ args, callback });
+      },
+    );
+    writeRepo(workDir);
+    const cache = createGitStatusCache(workDir);
+    await flushMicrotasks();
+
+    cache.getStatus();
+    await answerGitRound('## main...origin/main\n');
+    expect(cache.getStatus()?.pullRequest).toBeNull();
+
+    vi.setSystemTime(new Date('2026-04-24T00:01:01Z'));
+    cache.getStatus();
+    await flushMicrotasks();
+
+    expect(pendingGh).toHaveLength(1);
+    answerGh('{"number":3,"url":"https://github.com/acme/repo/pull/3"}\n');
+    await flushMicrotasks();
+    expect(cache.getStatus()?.pullRequest?.number).toBe(3);
+    cache.dispose();
+  });
+
+  it('treats a whitespace-only GIT_DIR as a literal path', async () => {
+    const gitDir = join(workDir, ' ');
+    fakeFiles.set(join(gitDir, 'HEAD'), { type: 'file', content: 'ref: refs/heads/space\n' });
+    process.env['GIT_DIR'] = ' ';
+
+    const cache = createGitStatusCache(workDir);
+    await flushMicrotasks();
+
+    expect(cache.getStatus()?.branch).toBe('space');
+    cache.dispose();
+  });
+
+  it('strips only the single separator space in gitfile targets', async () => {
+    const gitDir = join(workDir, 'wt', '  admin');
+    fakeFiles.set(join(gitDir, 'HEAD'), { type: 'file', content: 'ref: refs/heads/two-space\n' });
+    const worktree = join(workDir, 'wt');
+    fakeFiles.set(join(worktree, '.git'), { type: 'file', content: 'gitdir:   admin\n' });
+
+    const cache = createGitStatusCache(worktree);
+    await flushMicrotasks();
+
+    expect(cache.getStatus()?.branch).toBe('two-space');
+    cache.dispose();
+  });
+
   it('treats an explicitly empty GIT_DIR as no repository', async () => {
     writeRepo(workDir);
     process.env['GIT_DIR'] = '';

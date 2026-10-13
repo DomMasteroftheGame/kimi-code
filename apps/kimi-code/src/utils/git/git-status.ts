@@ -51,7 +51,8 @@ interface StatsState {
 interface RepoState {
   headPath: string;
   readonly gitfilePath: string | null;
-  readonly physicalWorkDir: string | null;
+  physicalWorkDir: string | null;
+  readonly relativeGitDir: string | null;
   branch: string;
 }
 
@@ -155,6 +156,7 @@ export function createGitStatusCache(
         headPath: found.headPath,
         gitfilePath: found.gitfilePath,
         physicalWorkDir: found.physicalWorkDir,
+        relativeGitDir: found.relativeGitDir,
         branch: found.branch,
       };
       stats = { dirty: false, ahead: 0, behind: 0, diffAdded: 0, diffDeleted: 0, fetchedAt: 0 };
@@ -293,6 +295,27 @@ export function createGitStatusCache(
       const physical = await physicalDir(workDir);
       if (disposed || repo !== current) return;
       if (physical !== current.physicalWorkDir) {
+        if (current.relativeGitDir !== null) {
+          const headPath = join(resolve(physical, current.relativeGitDir), 'HEAD');
+          const branch = await readHeadBranch(headPath);
+          if (disposed || repo !== current) return;
+          if (branch === null) {
+            becomeNonRepo();
+            options.onChange?.();
+            requestProbe();
+            return;
+          }
+          closeWatcher();
+          if (disposed || repo !== current) return;
+          current.headPath = headPath;
+          current.physicalWorkDir = physical;
+          startWatcher(headPath);
+          if (branch !== current.branch) {
+            current.branch = branch;
+            options.onChange?.();
+          }
+          return;
+        }
         becomeNonRepo();
         options.onChange?.();
         requestProbe();
@@ -348,7 +371,9 @@ export function createGitStatusCache(
       .then(() => {
         if (disposed) return null;
         if (gh === undefined) gh = resolveCommandPath('gh', workDir);
-        return readPullRequest(gh, workDir);
+        return readPullRequest(gh, workDir, () => {
+          gh = undefined;
+        });
       })
       .then((value) => {
       if (disposed || pullRequest.requestId !== requestId) return;
@@ -372,18 +397,26 @@ interface RepoLocation {
   readonly branch: string;
   readonly gitfilePath: string | null;
   readonly physicalWorkDir: string | null;
+  readonly relativeGitDir: string | null;
 }
 
 async function findRepo(workDir: string): Promise<RepoLocation | null> {
   const envGitDir = process.env['GIT_DIR'];
   if (envGitDir !== undefined) {
-    if (envGitDir.trim().length === 0) return null;
-    const gitDir = isAbsolute(envGitDir)
-      ? envGitDir
-      : resolve(await physicalDir(workDir), envGitDir);
+    const physical = await physicalDir(workDir);
+    const relative = !isAbsolute(envGitDir);
+    const gitDir = relative ? resolve(physical, envGitDir) : envGitDir;
     const headPath = join(gitDir, 'HEAD');
     const branch = await readHeadBranch(headPath);
-    return branch === null ? null : { headPath, branch, gitfilePath: null, physicalWorkDir: null };
+    return branch === null
+      ? null
+      : {
+          headPath,
+          branch,
+          gitfilePath: null,
+          physicalWorkDir: relative ? physical : null,
+          relativeGitDir: relative ? envGitDir : null,
+        };
   }
 
   const ceilings = await ceilingDirectories();
@@ -411,6 +444,7 @@ async function findRepo(workDir: string): Promise<RepoLocation | null> {
             branch,
             gitfilePath: isGitfile ? dotGit : null,
             physicalWorkDir: startDir,
+            relativeGitDir: null,
           };
     }
     const parent = dirname(dir);
@@ -493,7 +527,9 @@ async function readGitdirPointer(dotGit: string, dir: string): Promise<string | 
   }
   const text = content.replace(/^\uFEFF/, '').replace(/\r?\n$/, '');
   if (!text.startsWith('gitdir:')) return null;
-  const target = text.slice('gitdir:'.length).replace(/^\s+/, '');
+  const rest = text.slice('gitdir:'.length);
+  if (rest.length === 0 || (rest[0] !== ' ' && rest[0] !== '\t')) return null;
+  const target = rest.slice(1);
   if (target.length === 0) return null;
   return isAbsolute(target) ? target : resolve(dir, target);
 }
@@ -605,7 +641,11 @@ function parseDiffNumstatCount(value: string | undefined): number {
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
-function readPullRequest(gh: string | undefined, workDir: string): Promise<PullRequestInfo | null> {
+function readPullRequest(
+  gh: string | undefined,
+  workDir: string,
+  onSpawnFailure?: () => void,
+): Promise<PullRequestInfo | null> {
   return new Promise((resolvePromise) => {
     if (gh === undefined) {
       resolvePromise(null);
@@ -628,6 +668,7 @@ function readPullRequest(gh: string | undefined, workDir: string): Promise<PullR
         },
         (error, stdout) => {
           if (error !== null) {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') onSpawnFailure?.();
             resolvePromise(null);
             return;
           }
