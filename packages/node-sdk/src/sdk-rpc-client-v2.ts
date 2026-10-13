@@ -804,10 +804,6 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     return this.getConfig();
   }
 
-  override supportsAtomicSectionReplace(): boolean {
-    return true;
-  }
-
   override async importCustomRegistry(
     options: ImportCustomRegistryOptions,
   ): Promise<ImportCustomRegistryResult> {
@@ -824,11 +820,6 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
         typeof details?.['status'] === 'number' ? details['status'] : undefined,
       );
     }
-  }
-
-  override async replaceConfigSections(sections: Record<string, unknown>): Promise<void> {
-    await this.configReady;
-    await this.klient.global.config.replaceSections({ sections });
   }
 
   override async refreshProviderModels(

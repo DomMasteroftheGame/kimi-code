@@ -30,16 +30,7 @@ export const refreshProviderModelsResponseSchema = z.object({
     .object({
       from: z.string(),
       to: z.string(),
-      from_model: z.object({
-        provider: z.string(),
-        model: z.string(),
-        max_context_size: z.number(),
-        display_name: z.string().optional(),
-        capabilities: z.array(z.string()).optional(),
-        support_efforts: z.array(z.string()).optional(),
-        default_effort: z.string().optional(),
-        adaptive_thinking: z.boolean().optional(),
-      }),
+      from_display_name: z.string(),
     })
     .optional(),
 });

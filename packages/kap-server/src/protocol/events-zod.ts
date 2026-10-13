@@ -655,16 +655,7 @@ export const modelCatalogChangedEventSchema = z.object({
     .object({
       from: z.string().min(1),
       to: z.string().min(1),
-      from_model: z.object({
-        provider: z.string().min(1),
-        model: z.string().min(1),
-        max_context_size: z.number(),
-        display_name: z.string().min(1).optional(),
-        capabilities: z.array(z.string().min(1)).optional(),
-        support_efforts: z.array(z.string().min(1)).optional(),
-        default_effort: z.string().min(1).optional(),
-        adaptive_thinking: z.boolean().optional(),
-      }),
+      from_display_name: z.string().min(1),
     })
     .optional(),
 });

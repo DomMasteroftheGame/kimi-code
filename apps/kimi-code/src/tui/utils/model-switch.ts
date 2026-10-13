@@ -1,9 +1,15 @@
-import { effectiveModelAlias, type ModelAlias, type ThinkingEffort } from '@moonshot-ai/kimi-code-sdk';
+import {
+  effectiveModelAlias,
+  type KimiConfig,
+  type ModelAlias,
+  type ThinkingEffort,
+} from '@moonshot-ai/kimi-code-sdk';
 
 import type { SlashCommandHost } from '../commands/dispatch';
-import { modelDisplayName } from '../components/dialogs/model-selector';
+import { defaultThinkingEffortFor, modelDisplayName } from '../components/dialogs/model-selector';
+import type { AppState } from '../types';
 import { formatErrorMessage } from './event-payload';
-import { thinkingEffortToConfig } from './thinking-config';
+import { thinkingEffortFromConfig, thinkingEffortToConfig } from './thinking-config';
 
 export const MODEL_SWITCH_CACHE_WARNING =
   'Note: Switching models invalidates the existing prompt cache. Use /new to avoid extra token costs.';
@@ -24,6 +30,38 @@ export function effectiveModelForHost(host: SlashCommandHost, model: ModelAlias)
   // backend) have no provider entry to look up; their own protocol declaration
   // plays the provider-identity role, mirroring the resolver.
   return effectiveModelAlias(model, providerType ?? model.protocol);
+}
+
+/**
+ * The model and thinking effort `config` gives the first lazily created
+ * session when it binds `alias`, for the session-less footer and the create
+ * call alike.
+ */
+export function lazyModelSelection(
+  config: KimiConfig,
+  alias: string | undefined,
+): Partial<AppState> {
+  // A default that disappeared from config (edited externally) clears the
+  // previously hydrated value instead of passing a stale explicit model to the
+  // first lazy-created session.
+  const patch: Partial<AppState> =
+    alias === undefined ? { model: '', maxContextTokens: 0 } : { model: alias };
+  const raw = alias === undefined ? undefined : config.models?.[alias];
+  if (raw?.maxContextSize !== undefined) {
+    patch.maxContextTokens = raw.maxContextSize;
+  }
+  const effort = thinkingEffortFromConfig(config.thinking);
+  if (effort !== undefined) {
+    patch.thinkingEffort = effort;
+  } else if (raw !== undefined) {
+    // No concrete effort configured: mirror the engine, which resolves the
+    // model's default effort at createSession time.
+    const providerType = config.providers?.[raw.provider]?.type;
+    patch.thinkingEffort = defaultThinkingEffortFor(
+      effectiveModelAlias(raw, providerType ?? raw.protocol),
+    );
+  }
+  return patch;
 }
 
 /**

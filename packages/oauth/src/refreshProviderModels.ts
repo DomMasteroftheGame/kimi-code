@@ -359,9 +359,8 @@ async function rebaseSelectionAfterFetch(
 
 // A registry retires a model by dropping it after declaring its replacement
 // through `upgrade`, which an earlier refresh persisted on the alias. Follow
-// that declaration instead of leaving the user without a default; the thinking
-// selection belonged to the dropped model, so it resets like any other replaced
-// default.
+// that declaration instead of leaving the user without a default, carrying the
+// user's thinking selection over the same way a surviving default keeps it.
 function followRetiredDefault(
   previous: ManagedKimiConfigShape,
   next: ManagedKimiConfigShape,
@@ -373,8 +372,7 @@ function followRetiredDefault(
   if (fromModel === undefined || to === undefined || readModel(next, to) === undefined) {
     return undefined;
   }
-  next.defaultModel = to;
-  next.thinking = undefined;
+  restoreDefaultSelection(next, to, previous.thinking?.enabled);
   return { from, to, fromModel };
 }
 

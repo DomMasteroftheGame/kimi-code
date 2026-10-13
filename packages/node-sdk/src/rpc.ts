@@ -221,8 +221,6 @@ export abstract class SDKRpcClientBase {
 
   abstract removeProvider(providerId: string): Promise<KimiConfig>;
 
-  abstract supportsAtomicSectionReplace(): boolean;
-
   abstract importCustomRegistry(
     options: ImportCustomRegistryOptions,
   ): Promise<ImportCustomRegistryResult>;
@@ -230,8 +228,6 @@ export abstract class SDKRpcClientBase {
   abstract refreshProviderModels(
     options?: RefreshProviderModelsOptions,
   ): Promise<RefreshProviderModelsResponse>;
-
-  abstract replaceConfigSections(sections: Record<string, unknown>): Promise<void>;
 
   abstract uploadFile(data: Uint8Array, options: UploadFileOptions): Promise<FileMeta>;
 

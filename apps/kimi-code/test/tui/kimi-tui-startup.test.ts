@@ -222,7 +222,6 @@ function makeHarness(session = makeSession(), overrides: Record<string, unknown>
     setTelemetryContext: vi.fn(),
     getExperimentalFeatures: vi.fn(async () => []),
     getWorkspaceTrustInfo: vi.fn(async () => ({ trusted: true, gatedMcpServers: [], gatedAdditionalDirs: [], additionalDirSources: [], warnings: [], instructionSources: { agentsMdPaths: [], skills: [], agentProfiles: [], paths: [] } })),
-    supportsAtomicSectionReplace: vi.fn(() => false),
     refreshProviderModels: vi.fn(async () => ({ changed: [], unchanged: [], failed: [] })),
     auth: {
       status: vi.fn(async () => ({ providers: [] })),
@@ -2443,42 +2442,32 @@ describe('KimiTUI startup', () => {
   });
 
   describe('when a refresh finds the default model dropped by its registry', () => {
-    const retiredDefault = {
-      from: 'acme/current',
-      to: 'acme/next',
-      from_model: {
-        provider: 'acme',
-        model: 'current',
-        max_context_size: 100,
-        capabilities: ['tool_use', 'thinking'],
-        support_efforts: ['low', 'high'],
-      },
-    };
+    const retiredDefault = { from: 'acme/current', to: 'acme/next', from_display_name: 'Current' };
 
-    async function refreshDroppingDefault(liveModel: string) {
-      const session = makeSession({
-        getStatus: vi.fn(async () => ({
-          model: 'acme/next',
-          thinkingEffort: 'low',
-          permission: 'manual',
-          planMode: false,
-          contextTokens: 10,
-          maxContextTokens: 100,
-          contextUsage: 0.1,
-        })),
-      });
+    async function refreshDroppingDefault(options: {
+      readonly withSession: boolean;
+      readonly model: string;
+      readonly lazySessionThinking?: 'high';
+    }) {
+      const session = makeSession();
       const setConfig = vi.fn(async () => ({}));
       const harness = makeHarness(session, {
         setConfig,
-        getConfig: vi.fn(async () => ({ defaultModel: 'acme/next' })),
+        getConfig: vi.fn(async () => ({
+          providers: { acme: { type: 'openai' } },
+          models: { 'acme/next': { provider: 'acme', model: 'next', maxContextSize: 200 } },
+          defaultModel: 'acme/next',
+          thinking: { enabled: true, effort: 'medium' },
+        })),
       });
       const driver = makeDriver(harness, makeStartupInput());
-      await driver.setSession(session);
+      if (options.withSession) await driver.setSession(session);
       installMigrationModels(driver);
       const remaining = { ...driver.state.appState.availableModels };
       delete remaining['acme/current'];
-      driver.state.appState.model = liveModel;
-      driver.state.appState.thinkingEffort = 'low';
+      driver.state.appState.model = options.model;
+      driver.state.appState.thinkingEffort = options.lazySessionThinking ?? 'low';
+      driver.state.appState.lazySessionThinking = options.lazySessionThinking;
       const showStatus = vi.spyOn(driver as any, 'showStatus');
       const startup = driver as unknown as {
         authFlow: { refreshProviderModels(): Promise<unknown> };
@@ -2500,28 +2489,60 @@ describe('KimiTUI startup', () => {
       await flushMigrationCheck();
 
       expect(showStatus).toHaveBeenCalledWith(
-        'current is no longer offered by its provider; the default model is now next.',
+        'Current is no longer offered by its provider; the default model is now next.',
         'warning',
       );
-      return { session, setConfig };
+      return { driver, session, setConfig };
     }
 
-    it('switches the session off it once the session picker closes, keeping the effort', async () => {
-      const { session, setConfig } = await refreshDroppingDefault('acme/current');
+    it('warns once the session picker closes and leaves the live session to the engine', async () => {
+      const { session, setConfig } = await refreshDroppingDefault({
+        withSession: true,
+        model: 'acme/current',
+      });
 
-      expect(session.setModel).toHaveBeenCalledWith('acme/next');
+      expect(session.setModel).not.toHaveBeenCalled();
       expect(session.setThinking).not.toHaveBeenCalled();
-      expect(setConfig).toHaveBeenCalledWith({
-        defaultModel: 'acme/next',
-        thinking: { enabled: true, effort: 'low' },
+      expect(setConfig).not.toHaveBeenCalled();
+    });
+
+    it('moves a session-less selection onto the new default with the configured thinking', async () => {
+      const { driver, setConfig } = await refreshDroppingDefault({
+        withSession: false,
+        model: 'acme/current',
+      });
+
+      expect(driver.state.appState).toMatchObject({
+        model: 'acme/next',
+        maxContextTokens: 200,
+        thinkingEffort: 'medium',
+        lazySessionThinking: undefined,
+      });
+      expect(setConfig).not.toHaveBeenCalled();
+    });
+
+    it('keeps a session-only effort picked before the first prompt', async () => {
+      const { driver } = await refreshDroppingDefault({
+        withSession: false,
+        model: 'acme/current',
+        lazySessionThinking: 'high',
+      });
+
+      expect(driver.state.appState).toMatchObject({
+        model: 'acme/next',
+        thinkingEffort: 'high',
+        lazySessionThinking: 'high',
       });
     });
 
-    it('leaves a session on another model alone', async () => {
-      const { session, setConfig } = await refreshDroppingDefault('acme/next');
+    it('leaves a session-less selection on another model alone', async () => {
+      const { driver } = await refreshDroppingDefault({ withSession: false, model: 'acme/next' });
 
-      expect(session.setModel).not.toHaveBeenCalled();
-      expect(setConfig).not.toHaveBeenCalled();
+      expect(driver.state.appState).toMatchObject({
+        model: 'acme/next',
+        thinkingEffort: 'low',
+        lazySessionThinking: undefined,
+      });
     });
   });
 

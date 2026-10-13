@@ -696,8 +696,8 @@ export function customRegistryReplacementKeys(
  * `apiKeyEnv`. Defaults (`defaultModel`/`defaultProvider`) that still resolve
  * after the rebuild are restored from the snapshot; a `defaultModel` left
  * dangling moves to the replacement it declared through `upgrade` when that
- * still resolves and is cleared otherwise, resetting `thinking` either way
- * (mirroring the refresh path).
+ * still resolves, keeping `thinking`, and is cleared together with `thinking`
+ * otherwise (mirroring the refresh path).
  */
 export function applyCustomRegistryEntries(
   config: ManagedKimiConfigShape,
@@ -723,7 +723,7 @@ export function applyCustomRegistryEntries(
     config.providers[r.previousDefaultProvider] !== undefined
       ? r.previousDefaultProvider
       : undefined;
-  if (config.defaultModel !== r.previousDefault) {
+  if (r.previousDefault !== undefined && config.defaultModel === undefined) {
     config.thinking = undefined;
   }
 }

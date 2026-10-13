@@ -330,7 +330,12 @@ describe('server-v2 /api/v1 model/provider catalog', () => {
   function discoveryStub(
     refreshProviderModels: IProviderDiscoveryServiceType['refreshProviderModels'],
   ): IProviderDiscoveryServiceType {
-    return { _serviceBrand: undefined, refreshProviderModels };
+    return {
+      _serviceBrand: undefined,
+      onDidRetireModel: () => ({ dispose: () => {} }),
+      refreshProviderModels,
+      retiredModelReplacement: () => undefined,
+    };
   }
 
   function oauthStub(

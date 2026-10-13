@@ -15,6 +15,7 @@ import type { SlashCommandHost } from '../commands/dispatch';
 import {
   effectiveModelForHost,
   hasConversationHistory,
+  lazyModelSelection,
   MODEL_SWITCH_CACHE_WARNING,
   performModelSwitch,
 } from '../utils/model-switch';
@@ -37,21 +38,6 @@ interface ModelMigration {
 }
 
 type RetiredDefault = NonNullable<RefreshProviderModelsResponse['retired_default']>;
-
-function modelFromRetiredDefault(retired: RetiredDefault): ModelAlias {
-  const record = retired.from_model;
-  return {
-    provider: record.provider,
-    model: record.model,
-    maxContextSize: record.max_context_size,
-    displayName: record.display_name,
-    capabilities: record.capabilities === undefined ? undefined : [...record.capabilities],
-    supportEfforts:
-      record.support_efforts === undefined ? undefined : [...record.support_efforts],
-    defaultEffort: record.default_effort,
-    adaptiveThinking: record.adaptive_thinking,
-  };
-}
 
 // The live effort is a user choice only when the source model can think at
 // all; keep it when the target supports it, else use the target's default.
@@ -103,23 +89,17 @@ function findModelMigration(
   };
 }
 
-// A switch needs an idle session and no open dialog (the startup session picker
-// may still resume a different session); the prompt also waits for an empty,
-// idle editor.
-function canSwitchModel(host: SlashCommandHost): boolean {
+// Accepting switches models, which needs an idle session and no open dialog
+// (the startup session picker may still resume a different session); the
+// prompt also waits for an empty, idle editor.
+function canShowModelMigrationPrompt(host: SlashCommandHost): boolean {
   return (
     host.state.activeDialog === null &&
     !host.state.editorReplacementMounted &&
     !host.sessionReplacementInFlight &&
     !host.state.appState.isCompacting &&
     !host.state.appState.isReplaying &&
-    host.state.appState.streamingPhase === 'idle'
-  );
-}
-
-function canShowModelMigrationPrompt(host: SlashCommandHost): boolean {
-  return (
-    canSwitchModel(host) &&
+    host.state.appState.streamingPhase === 'idle' &&
     !host.state.externalEditorRunning &&
     host.state.queuedMessages.length === 0 &&
     !host.state.queuedMessageDispatchPending &&
@@ -143,10 +123,28 @@ export class ModelMigrationController {
     this.retry();
   }
 
-  /** Moves off a default model that a refresh found dropped by its registry. */
-  retire(retired: RetiredDefault): void {
+  /**
+   * Reflects a default model that a refresh found dropped by its registry. The
+   * engine already moved the default (keeping the configured thinking) and
+   * every live agent bound to it, so only a session-less selection can still
+   * point at it: it follows the new default the way startup hydration would,
+   * keeping a session-only effort picked before the first prompt.
+   */
+  async retire(retired: RetiredDefault): Promise<void> {
     this.retired = retired;
     this.request();
+    const onRetiredSelection = () =>
+      this.host.session === undefined && this.host.state.appState.model === retired.from;
+    if (!onRetiredSelection()) return;
+    const config = await this.host.harness.getConfig();
+    if (!onRetiredSelection()) return;
+    const { lazySessionThinking } = this.host.state.appState;
+    const selection = lazyModelSelection(config, retired.to);
+    this.host.setAppState(
+      lazySessionThinking === undefined
+        ? selection
+        : { ...selection, thinkingEffort: lazySessionThinking },
+    );
   }
 
   retry(): void {
@@ -159,16 +157,16 @@ export class ModelMigrationController {
           setImmediate(() => {
             this.scheduled = false;
             if (this.host.aborted || this.host.state.appState.model.length === 0) return;
-            // The dropped model cannot serve another turn, so the switch must
-            // not wait for an empty editor the way the prompt does.
+            // The retirement notice waits only for the startup session picker
+            // or another dialog to close, not for an empty editor.
             const retired = this.retired;
-            if (retired !== undefined) {
-              if (!canSwitchModel(this.host)) return;
+            if (
+              retired !== undefined &&
+              this.host.state.activeDialog === null &&
+              !this.host.state.editorReplacementMounted
+            ) {
               this.retired = undefined;
-              void switchFromRetiredDefault(this.host, retired).catch(() => {
-                this.host.showError('Failed to switch from the retired model.');
-              });
-              return;
+              showRetiredDefaultNotice(this.host, retired);
             }
             if (!canShowModelMigrationPrompt(this.host)) return;
             this.pending = false;
@@ -262,25 +260,14 @@ export async function maybeShowModelMigrationPrompt(
   });
 }
 
-async function switchFromRetiredDefault(
-  host: SlashCommandHost,
-  retired: RetiredDefault,
-): Promise<void> {
-  const to = host.state.appState.availableModels[retired.to];
-  if (to === undefined) return;
-  const fromModel = modelFromRetiredDefault(retired);
-  const fromName = sanitizeShellOutput(modelDisplayName(retired.from, fromModel));
-  const toName = sanitizeShellOutput(modelDisplayName(retired.to, to));
+function showRetiredDefaultNotice(host: SlashCommandHost, retired: RetiredDefault): void {
+  const fromName = sanitizeShellOutput(retired.from_display_name);
+  const toName = sanitizeShellOutput(
+    modelDisplayName(retired.to, host.state.appState.availableModels[retired.to]),
+  );
   host.showStatus(
     `${fromName} is no longer offered by its provider; the default model is now ${toName}.`,
     'warning',
-  );
-  if (host.state.appState.model !== retired.from) return;
-  await performModelSwitch(
-    host,
-    retired.to,
-    migrationEffort(host, fromModel, to),
-    'model-and-effort',
   );
 }
 

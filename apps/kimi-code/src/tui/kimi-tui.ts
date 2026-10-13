@@ -4,7 +4,7 @@ import { unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type { DeviceAuthorization } from '@moonshot-ai/kimi-code-oauth';
-import { effectiveModelAlias, log } from '@moonshot-ai/kimi-code-sdk';
+import { log } from '@moonshot-ai/kimi-code-sdk';
 import type {
   ApprovalRequest,
   ApprovalResponse,
@@ -81,7 +81,6 @@ import {
 } from './components/dialogs/approval-preview';
 import { CompactionComponent } from './components/dialogs/compaction';
 import { HelpPanelComponent } from './components/dialogs/help-panel';
-import { defaultThinkingEffortFor } from './components/dialogs/model-selector';
 import { QuestionDialogComponent } from './components/dialogs/question-dialog';
 import { SessionPickerComponent, type SessionRow } from './components/dialogs/session-picker';
 import { TrustPromptComponent, type TrustPromptChoice } from './components/dialogs/trust-prompt';
@@ -194,7 +193,7 @@ import { beginScreenTakeover, endScreenTakeover, type ScreenTakeover } from './u
 import { sessionRowsForPicker } from './utils/session-picker-rows';
 import { formatStepRetryDetail, formatStepRetryLabel } from './utils/step-retry';
 import { formatBashOutputForDisplay } from './utils/shell-output';
-import { thinkingEffortFromConfig } from './utils/thinking-config';
+import { lazyModelSelection } from './utils/model-switch';
 import { combineStartupNotice, isOAuthLoginRequiredError } from './utils/startup';
 import { installTerminalFocusTracking } from './utils/terminal-focus';
 import { notifyTerminalOnce } from './utils/terminal-notification';
@@ -845,7 +844,9 @@ export class KimiTUI {
       for (const f of result.failed) {
         this.showStatus(`Skipped refreshing ${f.provider}: ${f.reason}`, 'warning');
       }
-      if (result.retired_default !== undefined) this.modelMigration.retire(result.retired_default);
+      if (result.retired_default !== undefined) {
+        await this.modelMigration.retire(result.retired_default);
+      }
     } catch {
       // Best-effort: startup must not crash on background refresh failures.
     }
@@ -2436,21 +2437,10 @@ export class KimiTUI {
   async hydrateLazyConfigDefaults(): Promise<void> {
     const { startup } = this.options;
     const config = await this.harness.getConfig({ reload: true });
-    const patch: Partial<AppState> = {};
-    const startupModel = startup.model ?? config.defaultModel;
-    if (startupModel !== undefined) {
-      patch.model = startupModel;
-      const selected = config.models?.[startupModel];
-      if (selected?.maxContextSize !== undefined) {
-        patch.maxContextTokens = selected.maxContextSize;
-      }
-    } else {
-      // The default disappeared from config (edited externally): clear the
-      // previously hydrated value instead of passing a stale explicit model
-      // to the first lazy-created session.
-      patch.model = '';
-      patch.maxContextTokens = 0;
-    }
+    const patch: Partial<AppState> = lazyModelSelection(
+      config,
+      startup.model ?? config.defaultModel,
+    );
     // CLI --auto/--yolo/--plan win over config defaults; the flags are
     // re-applied by applyStartupPermissionAndPlanToAppState at startup.
     if (!startup.auto && !startup.yolo) {
@@ -2464,20 +2454,6 @@ export class KimiTUI {
     patch.configDefaultPlanMode = config.defaultPlanMode === true;
     if (!startup.plan) {
       patch.planMode = config.defaultPlanMode === true;
-    }
-    const effort = thinkingEffortFromConfig(config.thinking);
-    if (effort !== undefined) {
-      patch.thinkingEffort = effort;
-    } else if (startupModel !== undefined) {
-      // No concrete effort configured: mirror the engine, which resolves the
-      // model's default effort at createSession time.
-      const raw = config.models?.[startupModel];
-      if (raw !== undefined) {
-        const providerType = config.providers?.[raw.provider]?.type;
-        patch.thinkingEffort = defaultThinkingEffortFor(
-          effectiveModelAlias(raw, providerType ?? raw.protocol),
-        );
-      }
     }
     if (startup.agentProfile !== undefined || startup.agentFiles !== undefined) {
       patch.agentProfile = startup.agentProfile;

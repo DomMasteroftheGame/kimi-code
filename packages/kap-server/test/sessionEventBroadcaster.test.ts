@@ -1663,15 +1663,7 @@ describe('SessionEventBroadcaster', () => {
       const retiredDefault = {
         from: 'acme/current',
         to: 'acme/next',
-        from_model: {
-          provider: 'acme',
-          model: 'current',
-          max_context_size: 131072,
-          display_name: 'Current',
-          capabilities: ['tool_use'],
-          support_efforts: ['low', 'high'],
-          default_effort: 'high',
-        },
+        from_display_name: 'Current',
       };
       eventBus.emit({
         type: 'event.model_catalog.changed',

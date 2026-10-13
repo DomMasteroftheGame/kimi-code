@@ -814,7 +814,7 @@ describe('applyCustomRegistryEntries', () => {
     expect(config.defaultModel).toBeUndefined();
   });
 
-  it('moves a dropped defaultModel to the upgrade target it declared', () => {
+  it('moves a dropped defaultModel to the upgrade target it declared, keeping thinking', () => {
     const source: CustomRegistrySource = {
       kind: 'apiJson',
       url: 'https://registry.example.test/api.json',
@@ -853,7 +853,7 @@ describe('applyCustomRegistryEntries', () => {
 
     expect(config.models?.['x/legacy']).toBeUndefined();
     expect(config.defaultModel).toBe('x/next');
-    expect(config.thinking).toBeUndefined();
+    expect(config.thinking).toEqual({ enabled: true });
   });
 
   // Re-import semantics: when a provider that existed in a previous import is
