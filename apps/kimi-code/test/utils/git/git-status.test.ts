@@ -117,6 +117,12 @@ function enoent(path: string): NodeJS.ErrnoException {
   return error;
 }
 
+function eacces(path: string): NodeJS.ErrnoException {
+  const error = new Error(`EACCES: permission denied: ${path}`) as NodeJS.ErrnoException;
+  error.code = 'EACCES';
+  return error;
+}
+
 function writeRepo(dir: string, head = 'ref: refs/heads/main\n'): void {
   fakeFiles.set(join(dir, '.git'), { type: 'dir' });
   fakeFiles.set(join(dir, '.git', 'HEAD'), { type: 'file', content: head });
@@ -446,6 +452,107 @@ describe('git status cache', () => {
     expect(cache.getStatus()).toBeNull();
     expect(onChange).toHaveBeenCalledTimes(1);
     expect(pendingGit).toHaveLength(0);
+    cache.dispose();
+  });
+
+  it('treats a nonzero numeric GIT_DISCOVERY_ACROSS_FILESYSTEM as enabled', async () => {
+    const root = resolve('/');
+    fakeFiles.set(workDir, { type: 'dir', dev: 1 });
+    fakeFiles.set(resolve('/virtual'), { type: 'dir', dev: 1 });
+    fakeFiles.set(root, { type: 'dir', dev: 2 });
+    writeRepo(root, 'ref: refs/heads/other-device\n');
+    process.env['GIT_DISCOVERY_ACROSS_FILESYSTEM'] = '2';
+
+    const cache = createGitStatusCache(workDir);
+    await flushMicrotasks();
+
+    expect(cache.getStatus()?.branch).toBe('other-device');
+    cache.dispose();
+  });
+
+  it('resolves a relative GIT_DIR from the physical work directory', async () => {
+    const physical = resolve('/virtual/physical');
+    const gitDir = join(physical, 'repo.git');
+    fakeFiles.set(join(gitDir, 'HEAD'), {
+      type: 'file',
+      content: 'ref: refs/heads/env-physical\n',
+    });
+    const linked = resolve('/virtual/linked');
+    mocks.fsRealpath.mockImplementation((path: string) =>
+      Promise.resolve(path === linked ? physical : path),
+    );
+    process.env['GIT_DIR'] = 'repo.git';
+
+    const cache = createGitStatusCache(linked);
+    await flushMicrotasks();
+
+    expect(cache.getStatus()?.branch).toBe('env-physical');
+    cache.dispose();
+  });
+
+  it('preserves whitespace in gitfile target paths', async () => {
+    const gitDir = join(workDir, 'admin ');
+    fakeFiles.set(join(gitDir, 'HEAD'), { type: 'file', content: 'ref: refs/heads/spaced\n' });
+    const worktree = join(workDir, 'wt');
+    fakeFiles.set(join(worktree, '.git'), { type: 'file', content: 'gitdir: ../admin \n' });
+
+    const cache = createGitStatusCache(worktree);
+    await flushMicrotasks();
+
+    expect(cache.getStatus()?.branch).toBe('spaced');
+    cache.dispose();
+  });
+
+  it('keeps the badge when the gitfile read fails transiently', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-24T00:00:00Z'));
+    const gitDir = join(workDir, 'admin');
+    fakeFiles.set(join(gitDir, 'HEAD'), { type: 'file', content: 'ref: refs/heads/alpha\n' });
+    const worktree = join(workDir, 'wt');
+    const gitfile = join(worktree, '.git');
+    fakeFiles.set(gitfile, { type: 'file', content: 'gitdir: ../admin\n' });
+
+    const cache = createGitStatusCache(worktree);
+    await flushMicrotasks();
+    expect(cache.getStatus()?.branch).toBe('alpha');
+
+    const defaultReadFile = mocks.fsReadFile.getMockImplementation();
+    mocks.fsReadFile.mockImplementation((path: string) =>
+      path === gitfile ? Promise.reject(eacces(gitfile)) : defaultReadFile!(path),
+    );
+    cache.refresh();
+    await flushMicrotasks();
+
+    expect(cache.getStatus()?.branch).toBe('alpha');
+    expect(watchers[0]!.close).not.toHaveBeenCalled();
+    cache.dispose();
+  });
+
+  it('re-discovers the repository when the workDir symlink is retargeted', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-24T00:00:00Z'));
+    const repoA = resolve('/virtual/repo-a');
+    const repoB = resolve('/virtual/repo-b');
+    writeRepo(repoA, 'ref: refs/heads/alpha\n');
+    writeRepo(repoB, 'ref: refs/heads/beta\n');
+    const linked = resolve('/virtual/project');
+    let target = repoA;
+    mocks.fsRealpath.mockImplementation((path: string) =>
+      Promise.resolve(path === linked ? target : path),
+    );
+
+    const onChange = vi.fn();
+    const cache = createGitStatusCache(linked, { onChange });
+    await flushMicrotasks();
+    expect(cache.getStatus()?.branch).toBe('alpha');
+
+    target = repoB;
+    onChange.mockClear();
+    cache.refresh();
+    await flushMicrotasks();
+
+    expect(cache.getStatus()?.branch).toBe('beta');
+    expect(onChange).toHaveBeenCalled();
     cache.dispose();
   });
 
