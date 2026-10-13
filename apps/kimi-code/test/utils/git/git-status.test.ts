@@ -6,7 +6,7 @@ const mocks = vi.hoisted(() => ({
   resolveCommandPath: vi.fn(),
   chokidarWatch: vi.fn(),
   fsStat: vi.fn(),
-  fsReadFile: vi.fn(),
+  fsOpen: vi.fn(),
   fsRealpath: vi.fn(),
 }));
 
@@ -16,7 +16,7 @@ vi.mock('node:child_process', () => ({
 
 vi.mock('node:fs/promises', () => ({
   stat: mocks.fsStat,
-  readFile: mocks.fsReadFile,
+  open: mocks.fsOpen,
   realpath: mocks.fsRealpath,
 }));
 
@@ -98,10 +98,18 @@ beforeEach(() => {
       isFile: () => entry.type === 'file',
     });
   });
-  mocks.fsReadFile.mockImplementation((path: string) => {
+  mocks.fsOpen.mockImplementation((path: string) => {
     const entry = fakeFiles.get(path);
     if (entry === undefined || entry.type !== 'file') return Promise.reject(enoent(path));
-    return Promise.resolve(entry.content);
+    return Promise.resolve({
+      read: (buffer: Buffer) => {
+        const content = Buffer.from(entry.content, 'utf8');
+        const bytesRead = Math.min(buffer.length, content.length);
+        content.copy(buffer, 0, 0, bytesRead);
+        return Promise.resolve({ bytesRead, buffer });
+      },
+      close: () => Promise.resolve(),
+    });
   });
   mocks.fsRealpath.mockImplementation((path: string) => Promise.resolve(path));
 });
@@ -160,7 +168,7 @@ function answerGh(result: string | Error): void {
 }
 
 async function flushMicrotasks(): Promise<void> {
-  for (let i = 0; i < 20; i++) await Promise.resolve();
+  for (let i = 0; i < 50; i++) await Promise.resolve();
 }
 
 const STATUS_DIRTY = '## main...origin/main [ahead 2, behind 1]\n M src/app.ts\n';
@@ -516,9 +524,9 @@ describe('git status cache', () => {
     await flushMicrotasks();
     expect(cache.getStatus()?.branch).toBe('alpha');
 
-    const defaultReadFile = mocks.fsReadFile.getMockImplementation();
-    mocks.fsReadFile.mockImplementation((path: string) =>
-      path === gitfile ? Promise.reject(eacces(gitfile)) : defaultReadFile!(path),
+    const defaultOpen = mocks.fsOpen.getMockImplementation();
+    mocks.fsOpen.mockImplementation((path: string) =>
+      path === gitfile ? Promise.reject(eacces(gitfile)) : defaultOpen!(path),
     );
     cache.refresh();
     await flushMicrotasks();
@@ -648,6 +656,48 @@ describe('git status cache', () => {
     answerGh('{"number":34,"url":"https://github.com/acme/other/pull/34"}\n');
     await flushMicrotasks();
     expect(cache.getStatus()?.pullRequest?.number).toBe(34);
+    cache.dispose();
+  });
+
+  it('treats an oversized HEAD as an invalid repository', async () => {
+    fakeFiles.set(join(workDir, '.git'), { type: 'dir' });
+    fakeFiles.set(join(workDir, '.git', 'HEAD'), {
+      type: 'file',
+      content: `ref: refs/heads/${'x'.repeat(5000)}\n`,
+    });
+
+    const cache = createGitStatusCache(workDir);
+    await flushMicrotasks();
+
+    expect(cache.getStatus()).toBeNull();
+    expect(mocks.chokidarWatch).not.toHaveBeenCalled();
+    cache.dispose();
+  });
+
+  it('rejects a HEAD ref containing control characters', async () => {
+    writeRepo(workDir, 'ref: refs/heads/]8;;https://evil.examplex\n');
+
+    const cache = createGitStatusCache(workDir);
+    await flushMicrotasks();
+
+    expect(cache.getStatus()).toBeNull();
+    expect(mocks.chokidarWatch).not.toHaveBeenCalled();
+    cache.dispose();
+  });
+
+  it('rejects malformed GIT_DISCOVERY_ACROSS_FILESYSTEM values like git does', async () => {
+    const root = resolve('/');
+    fakeFiles.set(workDir, { type: 'dir', dev: 1 });
+    fakeFiles.set(resolve('/virtual'), { type: 'dir', dev: 1 });
+    fakeFiles.set(root, { type: 'dir', dev: 2 });
+    writeRepo(root, 'ref: refs/heads/other-device\n');
+    process.env['GIT_DISCOVERY_ACROSS_FILESYSTEM'] = ' true ';
+
+    const cache = createGitStatusCache(workDir);
+    await flushMicrotasks();
+
+    expect(cache.getStatus()).toBeNull();
+    expect(mocks.chokidarWatch).not.toHaveBeenCalled();
     cache.dispose();
   });
 
