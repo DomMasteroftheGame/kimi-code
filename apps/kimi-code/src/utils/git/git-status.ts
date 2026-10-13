@@ -322,8 +322,8 @@ export function createGitStatusCache(
       }
       return;
     }
-    closeWatcher();
     if (disposed || repo !== current) return;
+    closeWatcher();
     invalidatePullRequest();
     current.headPath = headPath;
     startWatcher(headPath);
@@ -390,6 +390,7 @@ async function findRepo(workDir: string): Promise<RepoLocation | null> {
 
   const ceilings = await ceilingDirectories();
   const crossFilesystem = discoveryAcrossFilesystem();
+  if (crossFilesystem === 'invalid') return null;
   let dir = await physicalDir(workDir);
   let device = (await tryStat(dir))?.dev;
   for (;;) {
@@ -424,13 +425,14 @@ async function findRepo(workDir: string): Promise<RepoLocation | null> {
   }
 }
 
-function discoveryAcrossFilesystem(): boolean {
+function discoveryAcrossFilesystem(): boolean | 'invalid' {
   const raw = process.env['GIT_DISCOVERY_ACROSS_FILESYSTEM'];
   if (raw === undefined || raw === '') return false;
   const normalized = raw.toLowerCase();
   if (normalized === 'true' || normalized === 'yes' || normalized === 'on') return true;
   if (normalized === 'false' || normalized === 'no' || normalized === 'off') return false;
-  return /^[+-]?\d+$/.test(raw) && Number(raw) !== 0;
+  if (/^[+-]?\d+$/.test(raw)) return Number(raw) !== 0;
+  return 'invalid';
 }
 
 async function ceilingDirectories(): Promise<ReadonlySet<string>> {
@@ -486,6 +488,8 @@ const GITFILE_READ_LIMIT_BYTES = 4 * 1024;
 async function readBoundedUtf8(path: string): Promise<string | null> {
   let handle: FileHandle | null = null;
   try {
+    const fileStat = await stat(path);
+    if (!fileStat.isFile()) return null;
     handle = await open(path, 'r');
     const buffer = Buffer.alloc(GITFILE_READ_LIMIT_BYTES + 1);
     const { bytesRead } = await handle.read(buffer, 0, GITFILE_READ_LIMIT_BYTES + 1, 0);
@@ -501,7 +505,7 @@ async function readBoundedUtf8(path: string): Promise<string | null> {
 async function readGitdirPointer(dotGit: string, dir: string): Promise<string | null> {
   const content = await readBoundedUtf8(dotGit);
   if (content === null) return null;
-  const text = content.replace(/^\uFEFF/, '').replace(/\r?\n$/, '');
+  const text = content.replace(/\r?\n$/, '');
   if (!text.startsWith('gitdir:')) return null;
   const rest = text.slice('gitdir:'.length);
   if (rest.length === 0 || (rest[0] !== ' ' && rest[0] !== '\t')) return null;
@@ -513,7 +517,7 @@ async function readGitdirPointer(dotGit: string, dir: string): Promise<string | 
 async function readHeadBranch(headPath: string): Promise<string | null> {
   const content = await readBoundedUtf8(headPath);
   if (content === null) return null;
-  const text = content.replace(/^\uFEFF/, '').trim();
+  const text = content.trim();
   if (text.startsWith(HEAD_REF_PREFIX)) {
     const name = text.slice(HEAD_REF_PREFIX.length).trim();
     return name.length > 0 && !hasControlChars(name) ? name : null;

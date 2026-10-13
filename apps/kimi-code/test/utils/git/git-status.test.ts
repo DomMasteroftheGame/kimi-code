@@ -39,7 +39,10 @@ interface PendingCall {
   readonly callback: ExecCallback;
 }
 
-type FakeEntry = { readonly type: 'file'; content: string } | { readonly type: 'dir'; dev?: number };
+type FakeEntry =
+  | { readonly type: 'file'; content: string }
+  | { readonly type: 'dir'; dev?: number }
+  | { readonly type: 'fifo' };
 
 class FakeWatcher {
   readonly close = vi.fn(() => Promise.resolve());
@@ -439,6 +442,70 @@ describe('git status cache', () => {
     cache.dispose();
   });
 
+  it('does not close the watcher of a repository installed during gitfile revalidation', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-24T00:00:00Z'));
+    const gitDirA = join(workDir, 'admin-a');
+    const gitDirB = join(workDir, 'admin-b');
+    const betaHeadPath = join(gitDirB, 'HEAD');
+    fakeFiles.set(join(gitDirA, 'HEAD'), { type: 'file', content: 'ref: refs/heads/alpha\n' });
+    fakeFiles.set(betaHeadPath, { type: 'file', content: 'ref: refs/heads/beta\n' });
+    const worktree = join(workDir, 'wt');
+    const gitfile = join(worktree, '.git');
+    fakeFiles.set(gitfile, { type: 'file', content: 'gitdir: ../admin-a\n' });
+
+    const cache = createGitStatusCache(worktree);
+    await flushMicrotasks();
+    expect(cache.getStatus()?.branch).toBe('alpha');
+
+    const pendingOpens: Array<() => void> = [];
+    const defaultOpen = mocks.fsOpen.getMockImplementation();
+    mocks.fsOpen.mockImplementation((path: string) => {
+      if (path === betaHeadPath) {
+        return new Promise((resolveOpen) => {
+          pendingOpens.push(() =>
+            resolveOpen({
+              read: (buffer: Buffer) => {
+                const content = Buffer.from('ref: refs/heads/beta\n', 'utf8');
+                const bytesRead = Math.min(buffer.length, content.length);
+                content.copy(buffer, 0, 0, bytesRead);
+                return Promise.resolve({ bytesRead, buffer });
+              },
+              close: () => Promise.resolve(),
+            }),
+          );
+        });
+      }
+      return defaultOpen!(path);
+    });
+
+    fakeFiles.set(gitfile, { type: 'file', content: 'gitdir: ../admin-b\n' });
+    cache.refresh();
+    await flushMicrotasks();
+    expect(pendingOpens).toHaveLength(1);
+
+    fakeFiles.delete(join(gitDirA, 'HEAD'));
+    watchers[0]!.emit('unlink');
+    await flushMicrotasks();
+    expect(cache.getStatus()).toBeNull();
+    expect(watchers[0]!.close).toHaveBeenCalledTimes(1);
+
+    cache.refresh();
+    await flushMicrotasks();
+    expect(pendingOpens).toHaveLength(2);
+
+    pendingOpens[1]!();
+    await flushMicrotasks();
+    expect(cache.getStatus()?.branch).toBe('beta');
+    expect(watchers).toHaveLength(2);
+
+    pendingOpens[0]!();
+    await flushMicrotasks();
+    expect(watchers[1]!.close).not.toHaveBeenCalled();
+    expect(cache.getStatus()?.branch).toBe('beta');
+    cache.dispose();
+  });
+
   it('drops the badge when the gitfile is removed', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-04-24T00:00:00Z'));
@@ -821,11 +888,11 @@ describe('git status cache', () => {
     cache.dispose();
   });
 
-  it('resolves a relative gitdir pointer file with a BOM', async () => {
+  it('resolves a relative gitdir pointer file', async () => {
     const gitDir = join(workDir, 'real-git');
     fakeFiles.set(join(gitDir, 'HEAD'), { type: 'file', content: 'ref: refs/heads/worktree\n' });
     const worktree = join(workDir, 'wt');
-    fakeFiles.set(join(worktree, '.git'), { type: 'file', content: '\uFEFFgitdir: ../real-git\n' });
+    fakeFiles.set(join(worktree, '.git'), { type: 'file', content: 'gitdir: ../real-git\n' });
 
     const cache = createGitStatusCache(worktree);
     await flushMicrotasks();
@@ -834,6 +901,47 @@ describe('git status cache', () => {
       join(gitDir, 'HEAD'),
       expect.objectContaining({ usePolling: true }),
     );
+    cache.dispose();
+  });
+
+  it('rejects a BOM-prefixed gitfile like git does', async () => {
+    const gitDir = join(workDir, 'real-git');
+    fakeFiles.set(join(gitDir, 'HEAD'), { type: 'file', content: 'ref: refs/heads/worktree\n' });
+    const worktree = join(workDir, 'wt');
+    fakeFiles.set(join(worktree, '.git'), {
+      type: 'file',
+      content: String.fromCodePoint(0xfeff) + 'gitdir: ../real-git\n',
+    });
+
+    const cache = createGitStatusCache(worktree);
+    await flushMicrotasks();
+
+    expect(cache.getStatus()).toBeNull();
+    expect(mocks.chokidarWatch).not.toHaveBeenCalled();
+    cache.dispose();
+  });
+
+  it('does not open a HEAD that is not a regular file', async () => {
+    fakeFiles.set(join(workDir, '.git'), { type: 'dir' });
+    fakeFiles.set(join(workDir, '.git', 'HEAD'), { type: 'fifo' });
+
+    const cache = createGitStatusCache(workDir);
+    await flushMicrotasks();
+
+    expect(cache.getStatus()).toBeNull();
+    expect(mocks.fsOpen).not.toHaveBeenCalled();
+    cache.dispose();
+  });
+
+  it('rejects discovery entirely when the discovery boolean is malformed', async () => {
+    writeRepo(workDir);
+    process.env['GIT_DISCOVERY_ACROSS_FILESYSTEM'] = ' true ';
+
+    const cache = createGitStatusCache(workDir);
+    await flushMicrotasks();
+
+    expect(cache.getStatus()).toBeNull();
+    expect(mocks.chokidarWatch).not.toHaveBeenCalled();
     cache.dispose();
   });
 
