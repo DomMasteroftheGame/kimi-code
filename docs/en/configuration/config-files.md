@@ -570,7 +570,6 @@ Alongside `config.toml`, the CLI keeps terminal-UI and client preferences in a c
 | `[notifications].enabled` | `boolean` | `true` | Whether desktop notifications are sent |
 | `[notifications].notification_condition` | `string` | `unfocused` | When to notify: `unfocused` (only when the terminal is not focused) or `always` |
 | `[upgrade].auto_install` | `boolean` | `true` | Whether new versions are installed automatically |
-| `[notice.model_migrations]` | `record<string, string>` | `{}` | Acknowledged model migrations, keyed by source alias with the target model id as the value; used to avoid prompting for the same migration again. `/reload` and `/reload-tui` load edits or deletions of these records without immediately showing a migration prompt |
 | `[status_line].items` | `string[]` | `[]` | Built-in slots on the first footer line and their order: `mode`, `goal`, `model`, `tasks`, `cwd`, `git`, `tips`; unknown ids are skipped with a warning |
 | `[status_line].command` | `string` | `""` | Custom status line command: its first stdout line replaces the footer, and a JSON snapshot is passed on stdin; capped at 300ms, throttled to once per second, failures fall back to the built-in layout |
 

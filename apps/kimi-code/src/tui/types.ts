@@ -83,7 +83,6 @@ export interface AppState {
   disableFeedbackSurvey?: boolean;
   notifications: NotificationsConfig;
   upgrade: UpgradePreferences;
-  modelMigrations?: Record<string, string>;
   /** Footer status line customization from tui.toml; absent means the default layout. */
   statusLine?: StatusLineConfig;
   markdown?: MarkdownConfig;

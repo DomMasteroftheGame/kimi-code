@@ -422,7 +422,7 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 
 列出所有供应商下已配置的模型别名。
 
-成功时 `data.items` 为 `{ provider, model, display_name?, max_context_size, capabilities?, support_efforts?, default_effort?, upgrade? }` 数组：`model` 是别名 id（供应商管理的别名为 `provider_id/model`，否则为裸键），`provider` 是所属供应商 id，`max_context_size` 是以 token 计的上下文窗口，`capabilities` / `support_efforts` / `default_effort` 描述能力标志与 Thinking 模式的 effort 支持。对于自定义 registry 模型，`upgrade` 可以包含 `{ model, migration_markdown, retirement_at? }`，用于引导用户切换到替代模型。
+成功时 `data.items` 为 `{ provider, model, display_name?, max_context_size, capabilities?, support_efforts?, default_effort?, upgrade? }` 数组：`model` 是别名 id（供应商管理的别名为 `provider_id/model`，否则为裸键），`provider` 是所属供应商 id，`max_context_size` 是以 token 计的上下文窗口，`capabilities` / `support_efforts` / `default_effort` 描述能力标志与 Thinking 模式的 effort 支持。对于自定义 registry 模型，`upgrade` 可以包含 `{ model, migration_markdown, retirement_at? }`，用于引导用户切换到替代模型；`migration_markdown` 中的占位符已替换为模型 ID。
 
 #### `POST /api/v1/models/{model_id}:set_default`
 

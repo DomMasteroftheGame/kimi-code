@@ -33,7 +33,7 @@ describe('ChoicePickerComponent', () => {
   it.each([24, 100])('renders Markdown notices and preserves paragraphs at width %s', (width) => {
     const picker = new ChoicePickerComponent({
       title: 'Migration',
-      noticeMarkdown: '### Upgrade\n\nUse **next** model.\n\n- Faster replies\n- [Details](https://example.com/upgrade)',
+      notice: { markdown: '### Upgrade\n\nUse **next** model.\n\n- Faster replies\n- [Details](https://example.com/upgrade)' },
       options: [{ value: 'keep', label: 'Keep current' }],
       onSelect: vi.fn(),
       onCancel: vi.fn(),

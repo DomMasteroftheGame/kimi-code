@@ -595,7 +595,7 @@ describe('applyCustomRegistryProvider', () => {
     expect(alias?.['defaultEffort']).toBeUndefined();
   });
 
-  it('persists upgrade metadata and clears it when upstream removes it', () => {
+  it('persists upgrade metadata with model ids filled in and clears it when upstream removes it', () => {
     const config: ManagedKimiConfigShape = { providers: {} };
     const source = {
       kind: 'apiJson' as const,
@@ -612,7 +612,7 @@ describe('applyCustomRegistryProvider', () => {
           id: 'current',
           upgrade: {
             model: 'actual-next',
-            migration_markdown: 'Use {model_to}',
+            migration_markdown: 'Move from {model_from} to {model_to}',
             retirement_at: null,
           },
         },
@@ -631,7 +631,7 @@ describe('applyCustomRegistryProvider', () => {
     applyCustomRegistryProvider(config, entry, source);
     expect(config.models?.['demo/current']?.['upgrade']).toEqual({
       model: 'demo/replacement-key',
-      migrationMarkdown: 'Use {model_to}',
+      migrationMarkdown: 'Move from current to actual-next',
     });
     expect(config.models?.['demo/self']?.['upgrade']).toBeUndefined();
     expect(config.models?.['demo/orphan']?.['upgrade']).toBeUndefined();

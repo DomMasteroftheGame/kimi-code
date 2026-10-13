@@ -422,7 +422,7 @@ These endpoints manage the two halves of model configuration — the [providers]
 
 Lists every configured model alias across all providers.
 
-On success, `data.items` is an array of `{ provider, model, display_name?, max_context_size, capabilities?, support_efforts?, default_effort?, upgrade? }`: `model` is the alias id (`provider_id/model` for provider-managed aliases, otherwise the bare key), `provider` the owning provider id, `max_context_size` the context window in tokens, and `capabilities` / `support_efforts` / `default_effort` describe capability flags and Thinking-mode effort support. For custom-registry models, `upgrade` may contain `{ model, migration_markdown, retirement_at? }` to guide users toward a replacement model.
+On success, `data.items` is an array of `{ provider, model, display_name?, max_context_size, capabilities?, support_efforts?, default_effort?, upgrade? }`: `model` is the alias id (`provider_id/model` for provider-managed aliases, otherwise the bare key), `provider` the owning provider id, `max_context_size` the context window in tokens, and `capabilities` / `support_efforts` / `default_effort` describe capability flags and Thinking-mode effort support. For custom-registry models, `upgrade` may contain `{ model, migration_markdown, retirement_at? }` to guide users toward a replacement model; placeholders in `migration_markdown` are already replaced with the model ids.
 
 #### `POST /api/v1/models/{model_id}:set_default`
 

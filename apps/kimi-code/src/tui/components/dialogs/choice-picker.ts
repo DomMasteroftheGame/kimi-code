@@ -42,9 +42,9 @@ export interface ChoicePickerOptions {
   readonly title: string;
   readonly hint?: string;
   readonly formatHint?: (text: string) => string;
-  readonly notice?: string;
-  readonly noticeMarkdown?: string;
-  /** Color tone for the notice line. Defaults to 'success'. */
+  /** Plain text shown in `noticeTone`, or Markdown rendered with the Markdown theme. */
+  readonly notice?: string | { readonly markdown: string };
+  /** Color tone for a plain-text notice. Defaults to 'success'. */
   readonly noticeTone?: 'success' | 'warning';
   readonly options: readonly ChoiceOption[];
   readonly currentValue?: string;
@@ -164,9 +164,10 @@ export class ChoicePickerComponent extends Container implements Focusable {
           : this.opts.formatHint(` ${hintLine}`),
       );
     }
-    if (this.opts.noticeMarkdown !== undefined) {
+    const notice = this.opts.notice;
+    if (typeof notice === 'object') {
       const markdown = new Markdown(
-        this.opts.noticeMarkdown,
+        notice.markdown,
         0,
         0,
         createMarkdownTheme(),
@@ -175,10 +176,10 @@ export class ChoicePickerComponent extends Container implements Focusable {
       );
       lines.push('');
       lines.push(...markdown.render(Math.max(1, width - 1)).map((line) => ` ${line}`));
-    } else if (this.opts.notice !== undefined) {
+    } else if (notice !== undefined) {
       const tone = this.opts.noticeTone ?? 'success';
       const noticeWidth = Math.max(1, width - 1);
-      for (const noticeLine of this.opts.notice.split(/\r?\n/)) {
+      for (const noticeLine of notice.split(/\r?\n/)) {
         for (const wrapped of wrapDescription(noticeLine, noticeWidth)) {
           lines.push(currentTheme.fg(tone, ` ${wrapped}`));
         }

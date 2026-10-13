@@ -8,15 +8,18 @@ import {
   thinkingAvailability,
 } from '../components/dialogs/model-selector';
 import {
-  currentTuiConfig,
   effectiveModelForHost,
   hasConversationHistory,
   MODEL_SWITCH_CACHE_WARNING,
   performModelSwitch,
 } from '../commands/config';
 import type { SlashCommandHost } from '../commands/dispatch';
-import { saveTuiConfig } from '../config';
+import type { RefreshResult } from '../utils/refresh-providers';
 import { sanitizeShellOutput } from '../utils/shell-output';
+import {
+  acknowledgeModelMigration,
+  readModelMigrationAcknowledgements,
+} from '#/utils/model-migration-state';
 
 interface ModelMigration {
   readonly fromAlias: string;
@@ -30,31 +33,24 @@ interface ModelMigration {
   readonly retirementAt?: string | null;
 }
 
-export interface RetiredDefaultModel {
-  readonly from: string;
-  readonly to: string;
-  /** The dropped model's record, captured before the refresh removed it. */
-  readonly fromModel?: ModelAlias;
-}
+type RetiredDefault = NonNullable<RefreshResult['retiredDefault']>;
 
 // The live effort is a user choice only when the source model can think at
 // all; keep it when the target supports it, else use the target's default.
-function migrationEffort(
-  host: SlashCommandHost,
-  from: ModelAlias | undefined,
-  to: ModelAlias,
-): ThinkingEffort {
+function migrationEffort(host: SlashCommandHost, from: ModelAlias, to: ModelAlias): ThinkingEffort {
   const targetModel = effectiveModelForHost(host, to);
   const liveEffort = host.state.appState.thinkingEffort;
-  return from !== undefined &&
-    thinkingAvailability(effectiveModelForHost(host, from)) !== 'unsupported' &&
+  return thinkingAvailability(effectiveModelForHost(host, from)) !== 'unsupported' &&
     segmentsFor(targetModel).includes(liveEffort)
     ? liveEffort
     : defaultThinkingEffortFor(targetModel);
 }
 
-function findModelMigration(host: SlashCommandHost): ModelMigration | undefined {
-  const { model: fromAlias, availableModels, modelMigrations = {} } = host.state.appState;
+function findModelMigration(
+  host: SlashCommandHost,
+  acknowledged: Readonly<Record<string, string>>,
+): ModelMigration | undefined {
+  const { model: fromAlias, availableModels } = host.state.appState;
   const from = availableModels[fromAlias];
   const upgrade = from?.upgrade;
   if (from === undefined || upgrade === undefined || upgrade.model === fromAlias) return;
@@ -65,7 +61,7 @@ function findModelMigration(host: SlashCommandHost): ModelMigration | undefined 
   );
   if (target === undefined) return;
   const [toAlias, to] = target;
-  if (modelMigrations[fromAlias] === to.model) return;
+  if (acknowledged[fromAlias] === to.model) return;
   const targetModel = effectiveModelForHost(host, to);
   const effort = migrationEffort(host, from, to);
   const migrationMarkdown = upgrade.migrationMarkdown.trim();
@@ -83,8 +79,6 @@ function findModelMigration(host: SlashCommandHost): ModelMigration | undefined 
     migrationMarkdown: sanitizeShellOutput(
       migrationMarkdown.length > 0
         ? migrationMarkdown
-            .replaceAll('{model_from}', from.model)
-            .replaceAll('{model_to}', to.model)
         : `We recommend switching from ${from.model} to ${to.model}.`,
     ),
     retirementAt: upgrade.retirementAt,
@@ -118,17 +112,21 @@ function canShowModelMigrationPrompt(host: SlashCommandHost): boolean {
 export class ModelMigrationController {
   private pending = false;
   private scheduled = false;
-  private retired: RetiredDefaultModel | undefined;
+  private retired: RetiredDefault | undefined;
+  // Read once per request rather than on every retry, which runs on each state
+  // change while a prompt is pending.
+  private acknowledged: Promise<Readonly<Record<string, string>>> = Promise.resolve({});
 
   constructor(private readonly host: SlashCommandHost & { readonly aborted: boolean }) {}
 
   request(): void {
     this.pending = true;
+    this.acknowledged = readModelMigrationAcknowledgements();
     this.retry();
   }
 
   /** Moves off a default model that a refresh found dropped by its registry. */
-  retire(retired: RetiredDefaultModel): void {
+  retire(retired: RetiredDefault): void {
     this.retired = retired;
     this.request();
   }
@@ -138,8 +136,8 @@ export class ModelMigrationController {
     this.scheduled = true;
     // Defer past editor submission and its lazy-session dispatch continuations.
     queueMicrotask(() => {
-      void this.host.waitForLazyCreation()
-        .then(() => {
+      void Promise.all([this.host.waitForSessionAssembly(), this.acknowledged])
+        .then(([, acknowledged]) => {
           setImmediate(() => {
             this.scheduled = false;
             if (this.host.aborted || this.host.state.appState.model.length === 0) return;
@@ -156,7 +154,7 @@ export class ModelMigrationController {
             }
             if (!canShowModelMigrationPrompt(this.host)) return;
             this.pending = false;
-            void maybeShowModelMigrationPrompt(this.host, () => {
+            void maybeShowModelMigrationPrompt(this.host, acknowledged, () => {
               this.request();
             });
           });
@@ -171,9 +169,10 @@ export class ModelMigrationController {
 
 export async function maybeShowModelMigrationPrompt(
   host: SlashCommandHost,
+  acknowledged: Readonly<Record<string, string>>,
   onDisplaced?: () => void,
 ): Promise<void> {
-  const migration = findModelMigration(host);
+  const migration = findModelMigration(host, acknowledged);
   if (migration === undefined || !canShowModelMigrationPrompt(host)) return;
 
   await new Promise<void>((resolve) => {
@@ -199,7 +198,7 @@ export async function maybeShowModelMigrationPrompt(
             return;
           }
         }
-        await acknowledgeModelMigration(host, migration);
+        await acknowledgeModelMigration(migration.fromAlias, migration.toModel);
         resolve();
       })().catch(() => {
         host.showError('Failed to save model migration preference.');
@@ -211,9 +210,11 @@ export async function maybeShowModelMigrationPrompt(
     host.mountEditorReplacement(
       new ChoicePickerComponent({
         title: 'Model migration available',
-        noticeMarkdown: hasConversationHistory(host)
-          ? `${notice}\n\n${MODEL_SWITCH_CACHE_WARNING}`
-          : notice,
+        notice: {
+          markdown: hasConversationHistory(host)
+            ? `${notice}\n\n${MODEL_SWITCH_CACHE_WARNING}`
+            : notice,
+        },
         options: [
           {
             value: 'switch',
@@ -245,11 +246,13 @@ export async function maybeShowModelMigrationPrompt(
 
 async function switchFromRetiredDefault(
   host: SlashCommandHost,
-  retired: RetiredDefaultModel,
+  retired: RetiredDefault,
 ): Promise<void> {
   const to = host.state.appState.availableModels[retired.to];
   if (to === undefined) return;
-  const fromName = sanitizeShellOutput(modelDisplayName(retired.from, retired.fromModel));
+  // The refresh read this record from the SDK config, so it has its model shape.
+  const fromModel = retired.fromModel as ModelAlias;
+  const fromName = sanitizeShellOutput(modelDisplayName(retired.from, fromModel));
   const toName = sanitizeShellOutput(modelDisplayName(retired.to, to));
   host.showStatus(
     `${fromName} is no longer offered by its provider; the default model is now ${toName}.`,
@@ -259,7 +262,7 @@ async function switchFromRetiredDefault(
   await performModelSwitch(
     host,
     retired.to,
-    migrationEffort(host, retired.fromModel, to),
+    migrationEffort(host, fromModel, to),
     'model-and-effort',
   );
 }
@@ -270,19 +273,4 @@ function migrationNotice(migration: ModelMigration): string {
   const timestamp = Date.parse(retirementAt);
   if (!Number.isFinite(timestamp)) return migration.migrationMarkdown;
   return `${migration.migrationMarkdown}\n\nRetirement date: ${new Date(timestamp).toLocaleDateString()}`;
-}
-
-async function acknowledgeModelMigration(
-  host: SlashCommandHost,
-  migration: ModelMigration,
-): Promise<void> {
-  const modelMigrations = {
-    ...host.state.appState.modelMigrations,
-    [migration.fromAlias]: migration.toModel,
-  };
-  host.setAppState({ modelMigrations });
-  await saveTuiConfig({
-    ...currentTuiConfig(host),
-    notice: { modelMigrations },
-  });
 }

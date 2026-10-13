@@ -488,7 +488,11 @@ describe('refreshAllProviderModels', () => {
     it('moves the default to the upgrade target the dropped model declared', async () => {
       const { host, result } = await refreshWithRegistryModels({ next: { id: 'next' } });
 
-      expect(result.retiredDefault).toEqual({ from: legacyAlias, to: nextAlias });
+      expect(result.retiredDefault).toEqual({
+        from: legacyAlias,
+        to: nextAlias,
+        fromModel: expect.objectContaining({ model: 'legacy' }),
+      });
       expect(host.current().models?.[legacyAlias]).toBeUndefined();
       expect(host.current().defaultModel).toBe(nextAlias);
       expect(host.current().thinking).toBeUndefined();

@@ -68,10 +68,6 @@ export const DEFAULT_MARKDOWN_CONFIG: MarkdownConfig = {
 export const TuiModeSchema = z.enum(['regular', 'fullscreen']);
 export type TuiMode = z.infer<typeof TuiModeSchema>;
 
-const NoticeConfigSchema = z.object({
-  modelMigrations: z.record(z.string(), z.string()),
-});
-
 export const TuiConfigFileSchema = z.object({
   theme: TuiThemeSchema.optional(),
   tui_mode: z.string().optional(),
@@ -101,11 +97,6 @@ export const TuiConfigFileSchema = z.object({
       mermaid: z.string().optional(),
     })
     .optional(),
-  notice: z
-    .object({
-      model_migrations: z.record(z.string(), z.string()).optional(),
-    })
-    .optional(),
 });
 
 export const TuiConfigSchema = z.object({
@@ -128,7 +119,6 @@ export const TuiConfigSchema = z.object({
   /** Present in every normalized config; optional only so hand-built test
    * fixtures from before this field existed still typecheck. */
   markdown: MarkdownConfigSchema.optional(),
-  notice: NoticeConfigSchema.optional(),
 });
 
 export type TuiConfigFileShape = z.infer<typeof TuiConfigFileSchema>;
@@ -302,10 +292,6 @@ export function normalizeTuiConfig(
     markdown: {
       mermaid: mermaidMode,
     },
-    notice:
-      config.notice === undefined
-        ? undefined
-        : { modelMigrations: config.notice.model_migrations ?? {} },
   });
 }
 
@@ -342,13 +328,6 @@ export function renderTuiConfig(config: TuiConfig): string {
 # It receives a JSON snapshot (model, cwd, git, usage, mode) on stdin.
 # command = "~/.kimi-code/statusline.sh"
 `;
-  const migrationEntries = Object.entries(config.notice?.modelMigrations ?? {});
-  const noticeSection =
-    migrationEntries.length === 0
-      ? ''
-      : `[notice.model_migrations]\n${migrationEntries
-          .map(([from, to]) => `${JSON.stringify(from)} = ${JSON.stringify(to)}`)
-          .join('\n')}\n`;
   return `# ~/.kimi-code/tui.toml
 # Client preferences for kimi-code.
 # Agent/runtime settings stay in ~/.kimi-code/config.toml.
@@ -371,8 +350,7 @@ notification_condition = "${config.notifications.condition}" # "unfocused" | "al
 auto_install = ${String(config.upgrade.autoInstall)} # true | false
 
 ${markdownSection}
-${statusSection}
-${noticeSection}`;
+${statusSection}`;
 }
 
 function escapeTomlBasicString(value: string): string {

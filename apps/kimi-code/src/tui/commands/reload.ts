@@ -76,7 +76,6 @@ export async function applyReloadedTuiConfig(
     disableFeedbackSurvey: config.disableFeedbackSurvey,
     notifications: config.notifications,
     upgrade: config.upgrade,
-    modelMigrations: config.notice?.modelMigrations ?? {},
     statusLine: config.statusLine,
     markdown: config.markdown,
   });

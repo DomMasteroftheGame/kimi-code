@@ -307,7 +307,7 @@ export async function setDefaultModel(
     // A first prompt may still be inside lazy creation: wait it out so the
     // pick lands on the new session instead of racing its assembly (same
     // coordination as the /model path).
-    await host.waitForLazyCreation();
+    await host.waitForSessionAssembly();
   }
   await host.harness.setConfig({
     defaultModel: alias,

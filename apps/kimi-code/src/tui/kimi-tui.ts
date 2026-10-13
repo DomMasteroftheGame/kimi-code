@@ -299,7 +299,6 @@ function createInitialAppState(input: KimiTUIStartupInput): AppState {
     disableFeedbackSurvey: input.tuiConfig.disableFeedbackSurvey,
     notifications: input.tuiConfig.notifications,
     upgrade: input.tuiConfig.upgrade,
-    modelMigrations: input.tuiConfig.notice?.modelMigrations ?? {},
     statusLine: input.tuiConfig.statusLine,
     markdown: input.tuiConfig.markdown,
     availableModels: {},
@@ -838,7 +837,6 @@ export class KimiTUI {
 
   private async refreshProviderModelsInBackground(): Promise<void> {
     try {
-      const modelsBeforeRefresh = this.state.appState.availableModels;
       const result = await this.authFlow.refreshProviderModels();
       for (const c of result.changed) {
         if (c.added <= 0) continue;
@@ -847,10 +845,7 @@ export class KimiTUI {
       for (const f of result.failed) {
         this.showStatus(`Skipped refreshing ${f.provider}: ${f.reason}`, 'warning');
       }
-      const retired = result.retiredDefault;
-      if (retired !== undefined) {
-        this.modelMigration.retire({ ...retired, fromModel: modelsBeforeRefresh[retired.from] });
-      }
+      if (result.retiredDefault !== undefined) this.modelMigration.retire(result.retiredDefault);
     } catch {
       // Best-effort: startup must not crash on background refresh failures.
     }
@@ -2565,7 +2560,7 @@ export class KimiTUI {
   }
 
   /** Await in-flight session assembly — lazy creation or a `/new` replacement — if any; no-op otherwise. */
-  async waitForLazyCreation(): Promise<void> {
+  async waitForSessionAssembly(): Promise<void> {
     await this.ensureSessionPromise;
     await this.newSessionPromise;
   }
@@ -2879,7 +2874,7 @@ export class KimiTUI {
     // A first-use lazy creation may still be in flight: wait it out so the
     // checks below see settled state — the pending prompt would otherwise
     // replace the resumed session when creation completes.
-    await this.waitForLazyCreation();
+    await this.waitForSessionAssembly();
     if (targetSessionId === this.state.appState.sessionId) {
       this.showStatus('Already on this session.');
       return true;
@@ -4283,7 +4278,7 @@ export class KimiTUI {
     // that is about to lock itself for the delete.
     this.sessionPickerScopeRequestToken += 1;
     try {
-      await this.waitForLazyCreation();
+      await this.waitForSessionAssembly();
       if (session.id === this.state.appState.sessionId && this.session !== undefined) {
         await this.deleteCurrentSessionFromPicker(session);
         return;

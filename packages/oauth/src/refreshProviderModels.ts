@@ -73,7 +73,12 @@ export interface RefreshResult {
    * Set when a registry dropped the default model and the default moved to the
    * replacement that model had declared through `upgrade`.
    */
-  readonly retiredDefault?: { readonly from: string; readonly to: string };
+  readonly retiredDefault?: {
+    readonly from: string;
+    readonly to: string;
+    /** The dropped model's record as it was before this refresh. */
+    readonly fromModel: ManagedKimiModelAlias;
+  };
 }
 
 export type RefreshProviderScope = 'all' | 'oauth';
@@ -363,11 +368,14 @@ function followRetiredDefault(
 ): RefreshResult['retiredDefault'] {
   const from = previous.defaultModel;
   if (from === undefined || readModel(next, from) !== undefined) return undefined;
+  const fromModel = readModel(previous, from);
   const to = declaredUpgradeTarget(previous, from);
-  if (to === undefined || readModel(next, to) === undefined) return undefined;
+  if (fromModel === undefined || to === undefined || readModel(next, to) === undefined) {
+    return undefined;
+  }
   next.defaultModel = to;
   next.thinking = undefined;
-  return { from, to };
+  return { from, to, fromModel };
 }
 
 // `apply*` may leave `defaultModel` pointing at an alias that no longer exists

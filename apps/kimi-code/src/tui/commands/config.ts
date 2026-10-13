@@ -69,7 +69,6 @@ export function currentTuiConfig(host: Pick<SlashCommandHost, 'state'>): TuiConf
       host.state.appState.disableFeedbackSurvey ?? DEFAULT_TUI_CONFIG.disableFeedbackSurvey,
     notifications: host.state.appState.notifications,
     upgrade: host.state.appState.upgrade,
-    notice: { modelMigrations: host.state.appState.modelMigrations ?? {} },
     statusLine: host.state.appState.statusLine ?? DEFAULT_TUI_CONFIG.statusLine,
     markdown: host.state.appState.markdown ?? DEFAULT_MARKDOWN_CONFIG,
   };
@@ -244,7 +243,7 @@ export async function handleEffortCommand(host: SlashCommandHost, args: string):
       'warning',
     );
   }
-  await performModelSwitch(host, alias, arg, true);
+  await performModelSwitch(host, alias, arg, 'model');
 }
 
 function showEffortPicker(
@@ -262,11 +261,11 @@ function showEffortPicker(
       warning: hasConversationHistory(host) ? EFFORT_SWITCH_CACHE_WARNING : undefined,
       onSelect: (effort) => {
         host.restoreEditor();
-        void performModelSwitch(host, alias, effort, true);
+        void performModelSwitch(host, alias, effort, 'model');
       },
       onSessionOnlySelect: (effort) => {
         host.restoreEditor();
-        void performModelSwitch(host, alias, effort, false);
+        void performModelSwitch(host, alias, effort, 'session');
       },
       onCancel: () => {
         host.restoreEditor();
@@ -388,11 +387,11 @@ export function showModelPicker(host: SlashCommandHost, selectedValue: string = 
       warning: hasConversationHistory(host) ? MODEL_SWITCH_CACHE_WARNING : undefined,
       onSelect: ({ alias, thinking }) => {
         host.restoreEditor();
-        void performModelSwitch(host, alias, thinking, true);
+        void performModelSwitch(host, alias, thinking, 'model');
       },
       onSessionOnlySelect: ({ alias, thinking }) => {
         host.restoreEditor();
-        void performModelSwitch(host, alias, thinking, false);
+        void performModelSwitch(host, alias, thinking, 'session');
       },
       onCancel: () => {
         host.restoreEditor();
@@ -401,18 +400,25 @@ export function showModelPicker(host: SlashCommandHost, selectedValue: string = 
   );
 }
 
+/**
+ * How a model switch is saved: `session` keeps it to this session, `model`
+ * saves the model as the default (and the effort only when it changed), and
+ * `model-and-effort` saves both.
+ */
+export type ModelSwitchPersistence = 'session' | 'model' | 'model-and-effort';
+
 export async function performModelSwitch(
   host: SlashCommandHost,
   alias: string,
   effort: ThinkingEffort,
-  persist: boolean | 'model-and-effort',
+  persist: ModelSwitchPersistence,
 ): Promise<boolean> {
   let session = host.session;
   if (session === undefined) {
     // A first prompt may still be inside lazy creation: wait it out so the
     // switch lands on the new session instead of being overwritten by its
     // assembly.
-    await host.waitForLazyCreation();
+    await host.waitForSessionAssembly();
     session = host.session;
   }
   if (host.state.appState.streamingPhase !== 'idle') {
@@ -472,8 +478,9 @@ export async function performModelSwitch(
     }
   }
 
+  const saveDefault = persist !== 'session';
   let persisted = false;
-  if (persist) {
+  if (saveDefault) {
     try {
       persisted = await persistModelSelection(
         host,
@@ -490,14 +497,14 @@ export async function performModelSwitch(
 
   let status: string;
   if (effectiveModelChanged) {
-    status = persist
+    status = saveDefault
       ? `Switched to ${displayName} with thinking ${effectiveEffort}.`
       : `Switched to ${displayName} with thinking ${effectiveEffort} for this session only.`;
   } else if (effectiveEffortChanged) {
-    status = persist
+    status = saveDefault
       ? `Thinking set to ${effectiveEffort}.`
       : `Thinking set to ${effectiveEffort} for this session only.`;
-  } else if (persist && persisted) {
+  } else if (saveDefault && persisted) {
     status = `Saved ${displayName} with thinking ${effectiveEffort} as default.`;
   } else {
     status = `Already using ${displayName} with thinking ${effectiveEffort}.`;

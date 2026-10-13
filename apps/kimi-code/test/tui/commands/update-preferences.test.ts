@@ -48,7 +48,6 @@ describe('update preference commands', () => {
       disableFeedbackSurvey: false,
       notifications: { enabled: true, condition: 'unfocused' },
       upgrade: { autoInstall: false },
-      notice: { modelMigrations: {} },
       statusLine: { items: null, command: null },
       markdown: { mermaid: 'final' },
     });

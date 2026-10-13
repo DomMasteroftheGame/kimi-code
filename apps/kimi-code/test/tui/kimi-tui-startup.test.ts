@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -34,6 +34,13 @@ vi.mock('#/tui/commands/prompts', async (importOriginal) => {
 });
 vi.mock('#/utils/clipboard/clipboard-text', () => ({
   copyTextToClipboard: vi.fn(async () => {}),
+}));
+const modelMigrationState = vi.hoisted(() => ({ acknowledged: {} as Record<string, string> }));
+vi.mock('#/utils/model-migration-state', () => ({
+  readModelMigrationAcknowledgements: vi.fn(async () => ({ ...modelMigrationState.acknowledged })),
+  acknowledgeModelMigration: vi.fn(async (fromAlias: string, toModel: string) => {
+    modelMigrationState.acknowledged = { ...modelMigrationState.acknowledged, [fromAlias]: toModel };
+  }),
 }));
 
 const copyTextToClipboardMock = vi.mocked(copyTextToClipboard);
@@ -1906,6 +1913,7 @@ describe('KimiTUI startup', () => {
   }
 
   function installMigrationModels(driver: StartupDriver): void {
+    modelMigrationState.acknowledged = {};
     driver.state.appState.model = 'acme/current';
     driver.state.appState.thinkingEffort = 'off';
     driver.state.appState.availableProviders = {
@@ -1919,7 +1927,7 @@ describe('KimiTUI startup', () => {
         capabilities: ['tool_use'],
         upgrade: {
           model: 'acme/next',
-          migrationMarkdown: 'Use {model_from} to {model_to}',
+          migrationMarkdown: 'Use current to next',
           retirementAt: undefined,
         },
       },
@@ -1935,8 +1943,6 @@ describe('KimiTUI startup', () => {
   }
 
   it.each(['off', 'high'])('persists the migration default effort when the live effort is %s', async (liveEffort) => {
-    const dir = mkdtempSync(join(tmpdir(), 'kimi-model-migration-'));
-    vi.stubEnv('KIMI_CODE_HOME', dir);
     const session = makeSession({
       getStatus: vi.fn(async () => ({
         model: 'acme/next',
@@ -1961,32 +1967,26 @@ describe('KimiTUI startup', () => {
     installMigrationModels(driver);
     driver.state.appState.thinkingEffort = liveEffort;
 
-    try {
-      const prompt = maybeShowModelMigrationPrompt(driver as any);
-      const picker = driver.state.editorContainer.children[0] as {
-        handleInput(data: string): void;
-        render(width: number): string[];
-      };
-      expect(picker.render(100).join('\n')).toContain('Use current to next');
-      picker.handleInput('\r');
-      await prompt;
+    const prompt = maybeShowModelMigrationPrompt(driver as any, {});
+    const picker = driver.state.editorContainer.children[0] as {
+      handleInput(data: string): void;
+      render(width: number): string[];
+    };
+    expect(picker.render(100).join('\n')).toContain('Use current to next');
+    picker.handleInput('\r');
+    await prompt;
 
-      expect(session.setModel).toHaveBeenCalledWith('acme/next');
-      if (liveEffort === 'high') {
-        expect(session.setThinking).not.toHaveBeenCalled();
-      } else {
-        expect(session.setThinking).toHaveBeenCalledWith('high');
-      }
-      expect(setConfig).toHaveBeenCalledWith({
-        defaultModel: 'acme/next',
-        thinking: { enabled: true, effort: 'high' },
-      });
-      expect(driver.state.appState.modelMigrations).toEqual({ 'acme/current': 'next' });
-      expect(readFileSync(join(dir, 'tui.toml'), 'utf-8')).toContain('"acme/current" = "next"');
-    } finally {
-      vi.unstubAllEnvs();
-      rmSync(dir, { recursive: true, force: true });
+    expect(session.setModel).toHaveBeenCalledWith('acme/next');
+    if (liveEffort === 'high') {
+      expect(session.setThinking).not.toHaveBeenCalled();
+    } else {
+      expect(session.setThinking).toHaveBeenCalledWith('high');
     }
+    expect(setConfig).toHaveBeenCalledWith({
+      defaultModel: 'acme/next',
+      thinking: { enabled: true, effort: 'high' },
+    });
+    expect(modelMigrationState.acknowledged).toEqual({ 'acme/current': 'next' });
   });
 
   it.each([
@@ -1994,8 +1994,6 @@ describe('KimiTUI startup', () => {
     ['off', ['low', 'high'], 'off'],
     ['max', ['max'], 'high'],
   ] as const)('resolves a live %s effort on a thinking source to the migration effort', async (liveEffort, sourceEfforts, expected) => {
-    const dir = mkdtempSync(join(tmpdir(), 'kimi-model-migration-'));
-    vi.stubEnv('KIMI_CODE_HOME', dir);
     const session = makeSession({
       getStatus: vi.fn(async () => ({
         model: 'acme/next',
@@ -2021,27 +2019,22 @@ describe('KimiTUI startup', () => {
     });
     driver.state.appState.thinkingEffort = liveEffort;
 
-    try {
-      const prompt = maybeShowModelMigrationPrompt(driver as any);
-      const picker = driver.state.editorContainer.children[0] as ChoicePickerComponent;
-      expect(picker.render(100).join('\n')).toContain(`thinking ${expected}`);
-      picker.handleInput('\r');
-      await prompt;
+    const prompt = maybeShowModelMigrationPrompt(driver as any, {});
+    const picker = driver.state.editorContainer.children[0] as ChoicePickerComponent;
+    expect(picker.render(100).join('\n')).toContain(`thinking ${expected}`);
+    picker.handleInput('\r');
+    await prompt;
 
-      expect(session.setModel).toHaveBeenCalledWith('acme/next');
-      if (expected === liveEffort) {
-        expect(session.setThinking).not.toHaveBeenCalled();
-      } else {
-        expect(session.setThinking).toHaveBeenCalledWith(expected);
-      }
-      expect(setConfig).toHaveBeenCalledWith({
-        defaultModel: 'acme/next',
-        thinking: expected === 'off' ? { enabled: false } : { enabled: true, effort: expected },
-      });
-    } finally {
-      vi.unstubAllEnvs();
-      rmSync(dir, { recursive: true, force: true });
+    expect(session.setModel).toHaveBeenCalledWith('acme/next');
+    if (expected === liveEffort) {
+      expect(session.setThinking).not.toHaveBeenCalled();
+    } else {
+      expect(session.setThinking).toHaveBeenCalledWith(expected);
     }
+    expect(setConfig).toHaveBeenCalledWith({
+      defaultModel: 'acme/next',
+      thinking: expected === 'off' ? { enabled: false } : { enabled: true, effort: expected },
+    });
   });
 
   it.each(['draft', 'streaming', 'dialog', 'compaction', 'replay', 'external-editor', 'shutdown'])('defers the startup migration during %s', async (blockedBy) => {
@@ -2092,7 +2085,7 @@ describe('KimiTUI startup', () => {
     expect(picker).toBeInstanceOf(ChoicePickerComponent);
     picker.handleInput(' ');
     expect(driver.state.editorReplacementMounted).toBe(true);
-    expect(driver.state.appState.modelMigrations).toEqual({});
+    expect(modelMigrationState.acknowledged).toEqual({});
     picker.handleInput('\u001B');
     await flushMigrationCheck();
     expect(driver.state.editorReplacementMounted).toBe(false);
@@ -2234,43 +2227,34 @@ describe('KimiTUI startup', () => {
   });
 
   it('keeps the current model and acknowledges the migration', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'kimi-model-migration-'));
-    vi.stubEnv('KIMI_CODE_HOME', dir);
     const session = makeSession();
     const driver = makeDriver(makeHarness(session), makeStartupInput());
     await driver.setSession(session);
     installMigrationModels(driver);
 
-    try {
-      const prompt = maybeShowModelMigrationPrompt(driver as any);
-      const picker = driver.state.editorContainer.children[0] as { handleInput(data: string): void };
-      picker.handleInput('\u001B[B');
-      picker.handleInput('\r');
-      await prompt;
+    const prompt = maybeShowModelMigrationPrompt(driver as any, {});
+    const picker = driver.state.editorContainer.children[0] as { handleInput(data: string): void };
+    picker.handleInput('\u001B[B');
+    picker.handleInput('\r');
+    await prompt;
 
-      expect(session.setModel).not.toHaveBeenCalled();
-      expect(session.setThinking).not.toHaveBeenCalled();
-      expect(driver.state.appState.model).toBe('acme/current');
-      expect(driver.state.appState.modelMigrations).toEqual({ 'acme/current': 'next' });
-      expect(readFileSync(join(dir, 'tui.toml'), 'utf-8')).toContain('"acme/current" = "next"');
-    } finally {
-      vi.unstubAllEnvs();
-      rmSync(dir, { recursive: true, force: true });
-    }
+    expect(session.setModel).not.toHaveBeenCalled();
+    expect(session.setThinking).not.toHaveBeenCalled();
+    expect(driver.state.appState.model).toBe('acme/current');
+    expect(modelMigrationState.acknowledged).toEqual({ 'acme/current': 'next' });
   });
 
-  it('renders provider migration Markdown after substituting model names', async () => {
+  it('renders provider migration Markdown', async () => {
     const driver = makeDriver(makeHarness(), makeStartupInput());
     installMigrationModels(driver);
     driver.state.appState.availableModels['acme/current']!.upgrade!.migrationMarkdown =
-      '### Upgrade\n\nSwitch **{model_from}** to **{model_to}**.\n\n- Faster replies';
+      '### Upgrade\n\nSwitch **current** to **next**.\n\n- Faster replies';
 
-    const prompt = maybeShowModelMigrationPrompt(driver as any);
+    const prompt = maybeShowModelMigrationPrompt(driver as any, {});
     const picker = driver.state.editorContainer.children[0] as ChoicePickerComponent;
     const output = picker.render(100).join('\n');
     expect(output).not.toContain('###');
     expect(output).not.toContain('**');
-    expect(output).not.toContain('{model_from}');
     expect(output).toContain('current');
     expect(output).toContain('next');
     picker.handleInput('\u001B');
@@ -2281,11 +2265,11 @@ describe('KimiTUI startup', () => {
     const driver = makeDriver(makeHarness(), makeStartupInput());
     installMigrationModels(driver);
     driver.state.appState.availableModels['acme/current']!.upgrade!.migrationMarkdown =
-      'Move to {model_to}\u001B]0;pwned\u0007 soon\u001B[2J';
+      'Move to next\u001B]0;pwned\u0007 soon\u001B[2J';
     driver.state.appState.availableModels['acme/next']!.displayName =
       'Next\u001B]8;;https://example.test\u0007';
 
-    const prompt = maybeShowModelMigrationPrompt(driver as any);
+    const prompt = maybeShowModelMigrationPrompt(driver as any, {});
     const picker = driver.state.editorContainer.children[0] as ChoicePickerComponent;
     const output = picker.render(100).join('\n');
     expect(output).toContain('Move to next soon');
@@ -2304,7 +2288,7 @@ describe('KimiTUI startup', () => {
       driver.state.transcriptEntries.push({ id: 'u1', kind: 'user', renderMode: 'plain', content: 'hello' });
     }
 
-    const prompt = maybeShowModelMigrationPrompt(driver as any);
+    const prompt = maybeShowModelMigrationPrompt(driver as any, {});
     const picker = driver.state.editorContainer.children[0] as ChoicePickerComponent;
     const output = picker.render(200).join('\n');
     if (withHistory) {
@@ -2323,7 +2307,7 @@ describe('KimiTUI startup', () => {
     const host = driver as unknown as KimiTUI;
     const onDisplaced = vi.fn();
     const settled = vi.fn();
-    const prompt = maybeShowModelMigrationPrompt(host, onDisplaced).then(settled);
+    const prompt = maybeShowModelMigrationPrompt(host, {}, onDisplaced).then(settled);
     const oldPicker = driver.state.editorContainer.children[0] as ChoicePickerComponent;
     const replacement = new ChoicePickerComponent({
       title: 'Another dialog', options: [], onSelect: vi.fn(), onCancel: vi.fn(),
@@ -2339,7 +2323,7 @@ describe('KimiTUI startup', () => {
     oldPicker.handleInput('\u001B');
     expect(driver.state.editorContainer.children[0]).toBe(action === 'replace' ? replacement : driver.state.editor);
     expect(setConfig).not.toHaveBeenCalled();
-    expect(driver.state.appState.modelMigrations).toEqual({});
+    expect(modelMigrationState.acknowledged).toEqual({});
     host.restoreEditor();
     expect(onDisplaced).toHaveBeenCalledOnce();
   });
@@ -2387,7 +2371,7 @@ describe('KimiTUI startup', () => {
     expect(panel.focused).toBe(true);
     expect(session.setModel).not.toHaveBeenCalled();
     expect(setConfig).not.toHaveBeenCalled();
-    expect(driver.state.appState.modelMigrations).toEqual({});
+    expect(modelMigrationState.acknowledged).toEqual({});
 
     host.setAppState({ streamingPhase: 'waiting' });
     if (modal === 'approval') host.hideApprovalPanel();
@@ -2403,7 +2387,7 @@ describe('KimiTUI startup', () => {
     host.restoreEditor();
     await flushMigrationCheck();
     expect(driver.state.editorReplacementMounted).toBe(false);
-    expect(driver.state.appState.modelMigrations).toEqual({});
+    expect(modelMigrationState.acknowledged).toEqual({});
   });
 
   it('cancels a model migration without acknowledging it', async () => {
@@ -2412,25 +2396,23 @@ describe('KimiTUI startup', () => {
     await driver.setSession(session);
     installMigrationModels(driver);
 
-    const prompt = maybeShowModelMigrationPrompt(driver as any);
+    const prompt = maybeShowModelMigrationPrompt(driver as any, {});
     const picker = driver.state.editorContainer.children[0] as { handleInput(data: string): void };
     picker.handleInput('\u001B');
     await prompt;
 
     expect(session.setModel).not.toHaveBeenCalled();
     expect(driver.state.editorReplacementMounted).toBe(false);
-    expect(driver.state.appState.modelMigrations).toEqual({});
+    expect(modelMigrationState.acknowledged).toEqual({});
   });
 
   it('skips acknowledged migrations and targets outside the current provider', async () => {
     const driver = makeDriver(makeHarness(), makeStartupInput());
     installMigrationModels(driver);
-    driver.state.appState.modelMigrations = { 'acme/current': 'next' };
 
-    await maybeShowModelMigrationPrompt(driver as any);
+    await maybeShowModelMigrationPrompt(driver as any, { 'acme/current': 'next' });
     expect(driver.state.editorReplacementMounted).toBe(false);
 
-    driver.state.appState.modelMigrations = {};
     driver.state.appState.availableModels = {
       'acme/current': driver.state.appState.availableModels['acme/current']!,
       'other/next': {
@@ -2439,7 +2421,23 @@ describe('KimiTUI startup', () => {
         maxContextSize: 100,
       },
     };
-    await maybeShowModelMigrationPrompt(driver as any);
+    await maybeShowModelMigrationPrompt(driver as any, {});
+    expect(driver.state.editorReplacementMounted).toBe(false);
+  });
+
+  it('skips a startup migration acknowledged in the state file', async () => {
+    const driver = makeDriver(makeHarness(), makeStartupInput());
+    installMigrationModels(driver);
+    modelMigrationState.acknowledged = { 'acme/current': 'next' };
+    const startup = driver as unknown as {
+      backgroundRefreshPromise: Promise<void>;
+      finishStartup(replay: boolean): Promise<void>;
+    };
+    startup.backgroundRefreshPromise = Promise.resolve();
+
+    await startup.finishStartup(false);
+    await flushMigrationCheck();
+
     expect(driver.state.editorReplacementMounted).toBe(false);
   });
 
@@ -2478,7 +2476,7 @@ describe('KimiTUI startup', () => {
       };
       vi.spyOn(startup.authFlow, 'refreshProviderModels').mockImplementation(async () => {
         driver.state.appState.availableModels = remaining;
-        return { changed: [], unchanged: [], failed: [], retiredDefault };
+        return { changed: [], unchanged: [], failed: [], retiredDefault: { ...retiredDefault, fromModel: dropped } };
       });
       driver.state.activeDialog = 'session-picker';
       driver.state.editor.setText('draft');

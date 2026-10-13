@@ -511,12 +511,16 @@ export function applyCustomRegistryProvider(
       displayName,
       supportEfforts: model.support_efforts,
       defaultEffort: model.default_effort,
+      // `{model_from}` / `{model_to}` belong to the registry format, so store
+      // the final text: every client then renders the same explanation.
       upgrade:
         targetAlias === undefined || upgrade === undefined
           ? undefined
           : {
               model: targetAlias,
-              migrationMarkdown: upgrade.migration_markdown,
+              migrationMarkdown: upgrade.migration_markdown
+                .replaceAll('{model_from}', model.id)
+                .replaceAll('{model_to}', upgrade.model),
               retirementAt: upgrade.retirement_at ?? undefined,
             },
     };
