@@ -37,6 +37,8 @@ import type {
   RenameSessionInput,
   ResumeSessionInput,
   ReloadSessionInput,
+  RefreshProviderModelsOptions,
+  RefreshProviderModelsResponse,
   SessionSummary,
   SessionSummaryPage,
   SkillSummary,
@@ -472,6 +474,12 @@ export class KimiHarness {
     options: ImportCustomRegistryOptions,
   ): Promise<ImportCustomRegistryResult> {
     return this.rpc.importCustomRegistry(options);
+  }
+
+  async refreshProviderModels(
+    options?: RefreshProviderModelsOptions,
+  ): Promise<RefreshProviderModelsResponse> {
+    return this.rpc.refreshProviderModels(options);
   }
 
   /**

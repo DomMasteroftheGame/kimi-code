@@ -223,6 +223,7 @@ function makeHarness(session = makeSession(), overrides: Record<string, unknown>
     getExperimentalFeatures: vi.fn(async () => []),
     getWorkspaceTrustInfo: vi.fn(async () => ({ trusted: true, gatedMcpServers: [], gatedAdditionalDirs: [], additionalDirSources: [], warnings: [], instructionSources: { agentsMdPaths: [], skills: [], agentProfiles: [], paths: [] } })),
     supportsAtomicSectionReplace: vi.fn(() => false),
+    refreshProviderModels: vi.fn(async () => ({ changed: [], unchanged: [], failed: [] })),
     auth: {
       status: vi.fn(async () => ({ providers: [] })),
       login: vi.fn(async () => {}),
@@ -1893,9 +1894,9 @@ describe('KimiTUI startup', () => {
     const showStatus = vi.spyOn(driver as any, "showStatus").mockImplementation(() => {});
     vi.spyOn((driver as any).authFlow, "refreshProviderModels").mockResolvedValue({
       changed: [
-        { providerId: "new-models", providerName: "New Models", added: 2, removed: 0 },
-        { providerId: "removed-models", providerName: "Removed Models", added: 0, removed: 3 },
-        { providerId: "metadata-only", providerName: "Metadata Only", added: 0, removed: 0 },
+        { provider_id: "new-models", provider_name: "New Models", added: 2, removed: 0 },
+        { provider_id: "removed-models", provider_name: "Removed Models", added: 0, removed: 3 },
+        { provider_id: "metadata-only", provider_name: "Metadata Only", added: 0, removed: 0 },
       ],
       unchanged: [],
       failed: [],
@@ -2442,7 +2443,17 @@ describe('KimiTUI startup', () => {
   });
 
   describe('when a refresh finds the default model dropped by its registry', () => {
-    const retiredDefault = { from: 'acme/current', to: 'acme/next' };
+    const retiredDefault = {
+      from: 'acme/current',
+      to: 'acme/next',
+      from_model: {
+        provider: 'acme',
+        model: 'current',
+        max_context_size: 100,
+        capabilities: ['tool_use', 'thinking'],
+        support_efforts: ['low', 'high'],
+      },
+    };
 
     async function refreshDroppingDefault(liveModel: string) {
       const session = makeSession({
@@ -2464,8 +2475,8 @@ describe('KimiTUI startup', () => {
       const driver = makeDriver(harness, makeStartupInput());
       await driver.setSession(session);
       installMigrationModels(driver);
-      const { 'acme/current': dropped, ...remaining } = driver.state.appState.availableModels;
-      Object.assign(dropped!, { capabilities: ['tool_use', 'thinking'], supportEfforts: ['low', 'high'] });
+      const remaining = { ...driver.state.appState.availableModels };
+      delete remaining['acme/current'];
       driver.state.appState.model = liveModel;
       driver.state.appState.thinkingEffort = 'low';
       const showStatus = vi.spyOn(driver as any, 'showStatus');
@@ -2476,7 +2487,7 @@ describe('KimiTUI startup', () => {
       };
       vi.spyOn(startup.authFlow, 'refreshProviderModels').mockImplementation(async () => {
         driver.state.appState.availableModels = remaining;
-        return { changed: [], unchanged: [], failed: [], retiredDefault: { ...retiredDefault, fromModel: dropped } };
+        return { changed: [], unchanged: [], failed: [], retired_default: retiredDefault };
       });
       driver.state.activeDialog = 'session-picker';
       driver.state.editor.setText('draft');
@@ -2512,118 +2523,6 @@ describe('KimiTUI startup', () => {
       expect(session.setModel).not.toHaveBeenCalled();
       expect(setConfig).not.toHaveBeenCalled();
     });
-  });
-
-  it("stages provider-refresh removals and persists one atomic write on atomic-capable harnesses", async () => {
-    const registryUrl = "https://registry.example.test/v1/models/api.json";
-    const source = { kind: "apiJson", url: registryUrl, apiKey: "sk-test-token" };
-    const replaceConfigSections = vi.fn(async (_sections: Record<string, unknown>) => {});
-    const removeProvider = vi.fn(async () => ({}));
-    const setConfig = vi.fn(async () => ({}));
-    const harness = makeHarness(makeSession(), {
-      supportsAtomicSectionReplace: vi.fn(() => true),
-      replaceConfigSections,
-      removeProvider,
-      setConfig,
-      getConfig: vi.fn(async () => ({
-        providers: {
-          a: { type: "openai", baseUrl: "https://a.example.test/v1", apiKey: "sk-test-token", source },
-          b: { type: "openai", baseUrl: "https://b.example.test/v1", apiKey: "sk-test-token", source },
-        },
-        models: {
-          "a/m1": { provider: "a", model: "m1", maxContextSize: 100, capabilities: ["tool_use"] },
-          "b/m1": { provider: "b", model: "m1", maxContextSize: 100, capabilities: ["tool_use"] },
-        },
-        defaultModel: "b/m1",
-        thinking: { enabled: true },
-      })),
-    });
-    const driver = makeDriver(harness, makeStartupInput());
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        new Response(
-          JSON.stringify({
-            a: {
-              id: "a",
-              name: "Provider A",
-              api: "https://a.example.test/v1",
-              type: "openai",
-              models: { m1: { id: "m1" } },
-            },
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        ),
-      ),
-    );
-    try {
-      const result = await (driver as any).authFlow.refreshProviderModels();
-
-      expect(result.failed).toEqual([]);
-      expect(result.changed).toContainEqual({ providerId: "b", providerName: "b", added: 0, removed: 1 });
-      expect(removeProvider).not.toHaveBeenCalled();
-      expect(setConfig).not.toHaveBeenCalled();
-      expect(replaceConfigSections).toHaveBeenCalledTimes(1);
-      const sections = replaceConfigSections.mock.calls[0]?.[0] as Record<string, unknown>;
-      expect(Object.keys(sections["providers"] as object)).toEqual(["a"]);
-      expect(sections["models"]).not.toHaveProperty("b/m1");
-      expect(sections["defaultModel"]).toBeUndefined();
-      expect(sections["thinking"]).toBeUndefined();
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it("keeps the two-phase removeProvider/setConfig host on harnesses without atomic replace", async () => {
-    const registryUrl = "https://registry.example.test/v1/models/api.json";
-    const source = { kind: "apiJson", url: registryUrl, apiKey: "sk-test-token" };
-    const replaceConfigSections = vi.fn(async () => {});
-    const removeProvider = vi.fn(async () => ({}));
-    const setConfig = vi.fn(async (patch: Record<string, unknown>) => patch);
-    const harness = makeHarness(makeSession(), {
-      replaceConfigSections,
-      removeProvider,
-      setConfig,
-      getConfig: vi.fn(async () => ({
-        providers: {
-          a: { type: "openai", baseUrl: "https://a.example.test/v1", apiKey: "sk-test-token", source },
-          b: { type: "openai", baseUrl: "https://b.example.test/v1", apiKey: "sk-test-token", source },
-        },
-        models: {
-          "a/m1": { provider: "a", model: "m1", maxContextSize: 100, capabilities: ["tool_use"] },
-          "b/m1": { provider: "b", model: "m1", maxContextSize: 100, capabilities: ["tool_use"] },
-        },
-        defaultModel: "b/m1",
-      })),
-    });
-    const driver = makeDriver(harness, makeStartupInput());
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        new Response(
-          JSON.stringify({
-            a: {
-              id: "a",
-              name: "Provider A",
-              api: "https://a.example.test/v1",
-              type: "openai",
-              models: { m1: { id: "m1" } },
-            },
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        ),
-      ),
-    );
-    try {
-      const result = await (driver as any).authFlow.refreshProviderModels();
-
-      expect(result.failed).toEqual([]);
-      expect(removeProvider).toHaveBeenCalledWith("b");
-      expect(setConfig).toHaveBeenCalledTimes(1);
-      expect(replaceConfigSections).not.toHaveBeenCalled();
-    } finally {
-      vi.unstubAllGlobals();
-    }
   });
 
   it('preserves fresh startup yolo and plan intent after OAuth login', async () => {

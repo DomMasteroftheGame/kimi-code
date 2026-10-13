@@ -1136,6 +1136,78 @@ key = "${titleOAuthRef.key}"
     }
   });
 
+  it('refreshes provider models through the harness and reports a retired default', async () => {
+    vi.stubGlobal('fetch', async () =>
+      Response.json({
+        acme: {
+          id: 'acme',
+          name: 'Acme',
+          type: 'openai',
+          api: 'https://acme.example.test/v1',
+          models: { next: { id: 'next', default_effort: 'high' } },
+        },
+      }),
+    );
+    const { harness } = await makeHarness();
+    try {
+      await harness.setConfig({
+        providers: {
+          acme: {
+            type: 'openai',
+            apiKey: 'sk-acme',
+            source: { kind: 'apiJson', url: 'https://registry.example.test/api.json', apiKey: 'sk-registry' },
+          },
+        },
+        models: {
+          'acme/current': {
+            provider: 'acme',
+            model: 'current',
+            maxContextSize: 131072,
+            capabilities: ['tool_use'],
+            displayName: 'Current',
+            supportEfforts: ['low', 'high'],
+            defaultEffort: 'high',
+            upgrade: { model: 'acme/next', migrationMarkdown: 'Use next' },
+          },
+          'acme/next': {
+            provider: 'acme',
+            model: 'next',
+            maxContextSize: 131072,
+            capabilities: ['tool_use'],
+            defaultEffort: 'high',
+          },
+        },
+        defaultModel: 'acme/current',
+        thinking: { enabled: true },
+      });
+
+      const result = await harness.refreshProviderModels();
+      expect(result).toEqual({
+        changed: [{ provider_id: 'acme', provider_name: 'Acme', added: 0, removed: 1 }],
+        unchanged: [],
+        failed: [],
+        retired_default: {
+          from: 'acme/current',
+          to: 'acme/next',
+          from_model: {
+            provider: 'acme',
+            model: 'current',
+            max_context_size: 131072,
+            display_name: 'Current',
+            capabilities: ['tool_use'],
+            support_efforts: ['low', 'high'],
+            default_effort: 'high',
+          },
+        },
+      });
+      const config = await harness.getConfig({ reload: true });
+      expect(config.defaultModel).toBe('acme/next');
+    } finally {
+      vi.unstubAllGlobals();
+      await harness.close();
+    }
+  });
+
   it('round-trips the secondaryModel pool field to the [secondary_model] config section', async () => {
     const { harness, homeDir } = await makeHarness();
     try {

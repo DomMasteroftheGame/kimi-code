@@ -1,4 +1,8 @@
-import type { ModelAlias, ThinkingEffort } from '@moonshot-ai/kimi-code-sdk';
+import type {
+  ModelAlias,
+  RefreshProviderModelsResponse,
+  ThinkingEffort,
+} from '@moonshot-ai/kimi-code-sdk';
 
 import { ChoicePickerComponent } from '../components/dialogs/choice-picker';
 import {
@@ -14,7 +18,6 @@ import {
   MODEL_SWITCH_CACHE_WARNING,
   performModelSwitch,
 } from '../utils/model-switch';
-import type { RefreshResult } from '../utils/refresh-providers';
 import { sanitizeShellOutput } from '../utils/shell-output';
 import {
   acknowledgeModelMigration,
@@ -33,7 +36,22 @@ interface ModelMigration {
   readonly retirementAt?: string | null;
 }
 
-type RetiredDefault = NonNullable<RefreshResult['retiredDefault']>;
+type RetiredDefault = NonNullable<RefreshProviderModelsResponse['retired_default']>;
+
+function modelFromRetiredDefault(retired: RetiredDefault): ModelAlias {
+  const record = retired.from_model;
+  return {
+    provider: record.provider,
+    model: record.model,
+    maxContextSize: record.max_context_size,
+    displayName: record.display_name,
+    capabilities: record.capabilities === undefined ? undefined : [...record.capabilities],
+    supportEfforts:
+      record.support_efforts === undefined ? undefined : [...record.support_efforts],
+    defaultEffort: record.default_effort,
+    adaptiveThinking: record.adaptive_thinking,
+  };
+}
 
 // The live effort is a user choice only when the source model can think at
 // all; keep it when the target supports it, else use the target's default.
@@ -250,8 +268,7 @@ async function switchFromRetiredDefault(
 ): Promise<void> {
   const to = host.state.appState.availableModels[retired.to];
   if (to === undefined) return;
-  // The refresh read this record from the SDK config, so it has its model shape.
-  const fromModel = retired.fromModel as ModelAlias;
+  const fromModel = modelFromRetiredDefault(retired);
   const fromName = sanitizeShellOutput(modelDisplayName(retired.from, fromModel));
   const toName = sanitizeShellOutput(modelDisplayName(retired.to, to));
   host.showStatus(

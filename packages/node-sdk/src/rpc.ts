@@ -65,6 +65,8 @@ import type {
   RenameSessionInput,
   ResumeSessionInput,
   ResumedSessionSummary,
+  RefreshProviderModelsOptions,
+  RefreshProviderModelsResponse,
   SessionSummary,
   SessionSummaryPage,
   SkillSummary,
@@ -224,6 +226,10 @@ export abstract class SDKRpcClientBase {
   abstract importCustomRegistry(
     options: ImportCustomRegistryOptions,
   ): Promise<ImportCustomRegistryResult>;
+
+  abstract refreshProviderModels(
+    options?: RefreshProviderModelsOptions,
+  ): Promise<RefreshProviderModelsResponse>;
 
   abstract replaceConfigSections(sections: Record<string, unknown>): Promise<void>;
 

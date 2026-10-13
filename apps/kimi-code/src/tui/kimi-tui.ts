@@ -840,12 +840,12 @@ export class KimiTUI {
       const result = await this.authFlow.refreshProviderModels();
       for (const c of result.changed) {
         if (c.added <= 0) continue;
-        this.showStatus(`${c.providerName} · +${String(c.added)} model${c.added > 1 ? 's' : ''}.`);
+        this.showStatus(`${c.provider_name} · +${String(c.added)} model${c.added > 1 ? 's' : ''}.`);
       }
       for (const f of result.failed) {
         this.showStatus(`Skipped refreshing ${f.provider}: ${f.reason}`, 'warning');
       }
-      if (result.retiredDefault !== undefined) this.modelMigration.retire(result.retiredDefault);
+      if (result.retired_default !== undefined) this.modelMigration.retire(result.retired_default);
     } catch {
       // Best-effort: startup must not crash on background refresh failures.
     }
