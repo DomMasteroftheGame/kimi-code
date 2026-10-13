@@ -1,4 +1,4 @@
-import type { ThinkingEffort } from '@moonshot-ai/kimi-code-sdk';
+import type { ModelAlias, ThinkingEffort } from '@moonshot-ai/kimi-code-sdk';
 
 import { ChoicePickerComponent } from '../components/dialogs/choice-picker';
 import {
@@ -30,6 +30,29 @@ interface ModelMigration {
   readonly retirementAt?: string | null;
 }
 
+export interface RetiredDefaultModel {
+  readonly from: string;
+  readonly to: string;
+  /** The dropped model's record, captured before the refresh removed it. */
+  readonly fromModel?: ModelAlias;
+}
+
+// The live effort is a user choice only when the source model can think at
+// all; keep it when the target supports it, else use the target's default.
+function migrationEffort(
+  host: SlashCommandHost,
+  from: ModelAlias | undefined,
+  to: ModelAlias,
+): ThinkingEffort {
+  const targetModel = effectiveModelForHost(host, to);
+  const liveEffort = host.state.appState.thinkingEffort;
+  return from !== undefined &&
+    thinkingAvailability(effectiveModelForHost(host, from)) !== 'unsupported' &&
+    segmentsFor(targetModel).includes(liveEffort)
+    ? liveEffort
+    : defaultThinkingEffortFor(targetModel);
+}
+
 function findModelMigration(host: SlashCommandHost): ModelMigration | undefined {
   const { model: fromAlias, availableModels, modelMigrations = {} } = host.state.appState;
   const from = availableModels[fromAlias];
@@ -44,14 +67,7 @@ function findModelMigration(host: SlashCommandHost): ModelMigration | undefined 
   const [toAlias, to] = target;
   if (modelMigrations[fromAlias] === to.model) return;
   const targetModel = effectiveModelForHost(host, to);
-  const liveEffort = host.state.appState.thinkingEffort;
-  // The live effort is a user choice only when the source model can think at
-  // all; keep it when the target supports it, else use the target's default.
-  const effort =
-    thinkingAvailability(effectiveModelForHost(host, from)) !== 'unsupported' &&
-    segmentsFor(targetModel).includes(liveEffort)
-      ? liveEffort
-      : defaultThinkingEffortFor(targetModel);
+  const effort = migrationEffort(host, from, to);
   const migrationMarkdown = upgrade.migrationMarkdown.trim();
   // Registry-supplied text reaches the terminal verbatim through pi-tui, so
   // strip control sequences the same way captured command output is.
@@ -75,15 +91,24 @@ function findModelMigration(host: SlashCommandHost): ModelMigration | undefined 
   };
 }
 
-function canShowModelMigrationPrompt(host: SlashCommandHost): boolean {
+// A switch needs an idle session and no open dialog (the startup session picker
+// may still resume a different session); the prompt also waits for an empty,
+// idle editor.
+function canSwitchModel(host: SlashCommandHost): boolean {
   return (
     host.state.activeDialog === null &&
     !host.state.editorReplacementMounted &&
-    !host.state.externalEditorRunning &&
     !host.sessionReplacementInFlight &&
     !host.state.appState.isCompacting &&
     !host.state.appState.isReplaying &&
-    host.state.appState.streamingPhase === 'idle' &&
+    host.state.appState.streamingPhase === 'idle'
+  );
+}
+
+function canShowModelMigrationPrompt(host: SlashCommandHost): boolean {
+  return (
+    canSwitchModel(host) &&
+    !host.state.externalEditorRunning &&
     host.state.queuedMessages.length === 0 &&
     !host.state.queuedMessageDispatchPending &&
     host.state.editor.getText().length === 0
@@ -93,12 +118,19 @@ function canShowModelMigrationPrompt(host: SlashCommandHost): boolean {
 export class ModelMigrationController {
   private pending = false;
   private scheduled = false;
+  private retired: RetiredDefaultModel | undefined;
 
   constructor(private readonly host: SlashCommandHost & { readonly aborted: boolean }) {}
 
   request(): void {
     this.pending = true;
     this.retry();
+  }
+
+  /** Moves off a default model that a refresh found dropped by its registry. */
+  retire(retired: RetiredDefaultModel): void {
+    this.retired = retired;
+    this.request();
   }
 
   retry(): void {
@@ -110,13 +142,19 @@ export class ModelMigrationController {
         .then(() => {
           setImmediate(() => {
             this.scheduled = false;
-            if (
-              this.host.aborted ||
-              !canShowModelMigrationPrompt(this.host) ||
-              this.host.state.appState.model.length === 0
-            ) {
+            if (this.host.aborted || this.host.state.appState.model.length === 0) return;
+            // The dropped model cannot serve another turn, so the switch must
+            // not wait for an empty editor the way the prompt does.
+            const retired = this.retired;
+            if (retired !== undefined) {
+              if (!canSwitchModel(this.host)) return;
+              this.retired = undefined;
+              void switchFromRetiredDefault(this.host, retired).catch(() => {
+                this.host.showError('Failed to switch from the retired model.');
+              });
               return;
             }
+            if (!canShowModelMigrationPrompt(this.host)) return;
             this.pending = false;
             void maybeShowModelMigrationPrompt(this.host, () => {
               this.request();
@@ -203,6 +241,27 @@ export async function maybeShowModelMigrationPrompt(
       },
     );
   });
+}
+
+async function switchFromRetiredDefault(
+  host: SlashCommandHost,
+  retired: RetiredDefaultModel,
+): Promise<void> {
+  const to = host.state.appState.availableModels[retired.to];
+  if (to === undefined) return;
+  const fromName = sanitizeShellOutput(modelDisplayName(retired.from, retired.fromModel));
+  const toName = sanitizeShellOutput(modelDisplayName(retired.to, to));
+  host.showStatus(
+    `${fromName} is no longer offered by its provider; the default model is now ${toName}.`,
+    'warning',
+  );
+  if (host.state.appState.model !== retired.from) return;
+  await performModelSwitch(
+    host,
+    retired.to,
+    migrationEffort(host, retired.fromModel, to),
+    'model-and-effort',
+  );
 }
 
 function migrationNotice(migration: ModelMigration): string {

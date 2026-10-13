@@ -431,6 +431,78 @@ describe('refreshAllProviderModels', () => {
     expect(host.setConfig).toHaveBeenCalledTimes(1);
   });
 
+  describe('when the registry drops the default model', () => {
+    const registryUrl = 'https://registry.example.test/v1/models/api.json';
+    const providerId = 'example_chat-completions';
+    const legacyAlias = `${providerId}/legacy`;
+    const nextAlias = `${providerId}/next`;
+
+    async function refreshWithRegistryModels(models: Record<string, unknown>) {
+      const host = makeRefreshHost({
+        providers: {
+          [providerId]: {
+            type: 'openai',
+            baseUrl: 'https://api.example.test/v1',
+            apiKey: 'sk-test-token',
+            source: { kind: 'apiJson', url: registryUrl, apiKey: 'sk-test-token' },
+          },
+        },
+        models: {
+          [legacyAlias]: {
+            provider: providerId,
+            model: 'legacy',
+            maxContextSize: 131072,
+            upgrade: { model: nextAlias, migrationMarkdown: 'Use next' },
+          },
+          [nextAlias]: { provider: providerId, model: 'next', maxContextSize: 131072 },
+        },
+        defaultModel: legacyAlias,
+        thinking: { enabled: true, effort: 'low' },
+      } as unknown as KimiConfig);
+      vi.stubGlobal(
+        'fetch',
+        vi.fn<FetchMock>(async () => {
+          return new Response(
+            JSON.stringify({
+              [providerId]: {
+                id: providerId,
+                name: 'Example',
+                api: 'https://api.example.test/v1',
+                type: 'openai',
+                models,
+              },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }),
+      );
+      const result = await refreshAllProviderModels({
+        getConfig: async () => host.current(),
+        removeProvider: host.removeProvider,
+        setConfig: host.setConfig,
+        resolveOAuthToken: vi.fn(),
+      });
+      return { host, result };
+    }
+
+    it('moves the default to the upgrade target the dropped model declared', async () => {
+      const { host, result } = await refreshWithRegistryModels({ next: { id: 'next' } });
+
+      expect(result.retiredDefault).toEqual({ from: legacyAlias, to: nextAlias });
+      expect(host.current().models?.[legacyAlias]).toBeUndefined();
+      expect(host.current().defaultModel).toBe(nextAlias);
+      expect(host.current().thinking).toBeUndefined();
+    });
+
+    it('clears the default when the declared target is gone too', async () => {
+      const { host, result } = await refreshWithRegistryModels({ other: { id: 'other' } });
+
+      expect(result.retiredDefault).toBeUndefined();
+      expect(host.current().defaultModel).toBeUndefined();
+      expect(host.current().thinking).toBeUndefined();
+    });
+  });
+
   it('adds custom-registry providers that appear under an existing source URL', async () => {
     const registryUrl = 'https://registry.example.test/v1/models/api.json';
     const apiKey = 'sk-test-token';

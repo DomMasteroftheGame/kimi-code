@@ -838,6 +838,7 @@ export class KimiTUI {
 
   private async refreshProviderModelsInBackground(): Promise<void> {
     try {
+      const modelsBeforeRefresh = this.state.appState.availableModels;
       const result = await this.authFlow.refreshProviderModels();
       for (const c of result.changed) {
         if (c.added <= 0) continue;
@@ -845,6 +846,10 @@ export class KimiTUI {
       }
       for (const f of result.failed) {
         this.showStatus(`Skipped refreshing ${f.provider}: ${f.reason}`, 'warning');
+      }
+      const retired = result.retiredDefault;
+      if (retired !== undefined) {
+        this.modelMigration.retire({ ...retired, fromModel: modelsBeforeRefresh[retired.from] });
       }
     } catch {
       // Best-effort: startup must not crash on background refresh failures.

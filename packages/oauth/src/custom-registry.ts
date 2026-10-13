@@ -560,6 +560,21 @@ export function removeCustomRegistryProvider(
 }
 
 /**
+ * The replacement alias that a stored model alias declared through registry
+ * `upgrade` metadata. Registries retire a model by dropping it after declaring
+ * this, so callers follow it when the alias it belongs to disappears.
+ */
+export function declaredUpgradeTarget(
+  config: ManagedKimiConfigShape,
+  alias: string | undefined,
+): string | undefined {
+  const model = alias === undefined ? undefined : config.models?.[alias];
+  return isRecord(model) && isRecord(model['upgrade'])
+    ? nonEmptyString(model['upgrade']['model'])
+    : undefined;
+}
+
+/**
  * Surfaces the credential env var each entry declares via its `env` field, as
  * `{ [entry.id]: varName }` — a hint only. The binding is never applied
  * automatically: the registry controls both the variable name and the endpoint
@@ -585,6 +600,7 @@ export function credentialEnvHints(
 export interface CustomRegistryRemoval {
   readonly prior: Readonly<Record<string, unknown>>;
   readonly previousDefault: string | undefined;
+  readonly previousDefaultUpgrade: string | undefined;
   readonly previousDefaultProvider: string | undefined;
 }
 
@@ -596,7 +612,8 @@ export interface CustomRegistryRemoval {
  * linger. The returned snapshot is captured BEFORE anything is removed — pass
  * it to `applyCustomRegistryEntries` so its provenance check can preserve
  * hand-edited `apiKeyEnv` declarations and its defaults restore still sees the
- * pre-removal `defaultModel`/`defaultProvider`.
+ * pre-removal `defaultModel` (with its declared `upgrade` target) and
+ * `defaultProvider`.
  */
 export function removeCustomRegistryEntries(
   config: ManagedKimiConfigShape,
@@ -607,6 +624,7 @@ export function removeCustomRegistryEntries(
   const removal: CustomRegistryRemoval = {
     prior: { ...config.providers },
     previousDefault: config.defaultModel,
+    previousDefaultUpgrade: declaredUpgradeTarget(config, config.defaultModel),
     previousDefaultProvider: config['defaultProvider'] as string | undefined,
   };
   for (const [providerId, provider] of Object.entries(config.providers)) {
@@ -673,7 +691,9 @@ export function customRegistryReplacementKeys(
  * provenance check is the single mechanism that preserves a hand-edited
  * `apiKeyEnv`. Defaults (`defaultModel`/`defaultProvider`) that still resolve
  * after the rebuild are restored from the snapshot; a `defaultModel` left
- * dangling is cleared (with `thinking`, mirroring the refresh path).
+ * dangling moves to the replacement it declared through `upgrade` when that
+ * still resolves and is cleared otherwise, resetting `thinking` either way
+ * (mirroring the refresh path).
  */
 export function applyCustomRegistryEntries(
   config: ManagedKimiConfigShape,
@@ -691,16 +711,15 @@ export function applyCustomRegistryEntries(
     applyCustomRegistryProvider(config, entry, source, r.prior);
   }
 
-  config.defaultModel =
-    r.previousDefault !== undefined && config.models?.[r.previousDefault] !== undefined
-      ? r.previousDefault
-      : undefined;
+  config.defaultModel = [r.previousDefault, r.previousDefaultUpgrade].find(
+    (alias) => alias !== undefined && config.models?.[alias] !== undefined,
+  );
   config['defaultProvider'] =
     r.previousDefaultProvider !== undefined &&
     config.providers[r.previousDefaultProvider] !== undefined
       ? r.previousDefaultProvider
       : undefined;
-  if (r.previousDefault !== undefined && config.defaultModel === undefined) {
+  if (config.defaultModel !== r.previousDefault) {
     config.thinking = undefined;
   }
 }

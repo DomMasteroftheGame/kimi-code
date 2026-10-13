@@ -2443,6 +2443,79 @@ describe('KimiTUI startup', () => {
     expect(driver.state.editorReplacementMounted).toBe(false);
   });
 
+  describe('when a refresh finds the default model dropped by its registry', () => {
+    const retiredDefault = { from: 'acme/current', to: 'acme/next' };
+
+    async function refreshDroppingDefault(liveModel: string) {
+      const session = makeSession({
+        getStatus: vi.fn(async () => ({
+          model: 'acme/next',
+          thinkingEffort: 'low',
+          permission: 'manual',
+          planMode: false,
+          contextTokens: 10,
+          maxContextTokens: 100,
+          contextUsage: 0.1,
+        })),
+      });
+      const setConfig = vi.fn(async () => ({}));
+      const harness = makeHarness(session, {
+        setConfig,
+        getConfig: vi.fn(async () => ({ defaultModel: 'acme/next' })),
+      });
+      const driver = makeDriver(harness, makeStartupInput());
+      await driver.setSession(session);
+      installMigrationModels(driver);
+      const { 'acme/current': dropped, ...remaining } = driver.state.appState.availableModels;
+      Object.assign(dropped!, { capabilities: ['tool_use', 'thinking'], supportEfforts: ['low', 'high'] });
+      driver.state.appState.model = liveModel;
+      driver.state.appState.thinkingEffort = 'low';
+      const showStatus = vi.spyOn(driver as any, 'showStatus');
+      const startup = driver as unknown as {
+        authFlow: { refreshProviderModels(): Promise<unknown> };
+        refreshProviderModelsInBackground(): Promise<void>;
+        modelMigration: { retry(): void };
+      };
+      vi.spyOn(startup.authFlow, 'refreshProviderModels').mockImplementation(async () => {
+        driver.state.appState.availableModels = remaining;
+        return { changed: [], unchanged: [], failed: [], retiredDefault };
+      });
+      driver.state.activeDialog = 'session-picker';
+      driver.state.editor.setText('draft');
+
+      await startup.refreshProviderModelsInBackground();
+      await flushMigrationCheck();
+      expect(showStatus).not.toHaveBeenCalled();
+      driver.state.activeDialog = null;
+      startup.modelMigration.retry();
+      await flushMigrationCheck();
+
+      expect(showStatus).toHaveBeenCalledWith(
+        'current is no longer offered by its provider; the default model is now next.',
+        'warning',
+      );
+      return { session, setConfig };
+    }
+
+    it('switches the session off it once the session picker closes, keeping the effort', async () => {
+      const { session, setConfig } = await refreshDroppingDefault('acme/current');
+
+      expect(session.setModel).toHaveBeenCalledWith('acme/next');
+      expect(session.setThinking).not.toHaveBeenCalled();
+      expect(setConfig).toHaveBeenCalledWith({
+        defaultModel: 'acme/next',
+        thinking: { enabled: true, effort: 'low' },
+      });
+    });
+
+    it('leaves a session on another model alone', async () => {
+      const { session, setConfig } = await refreshDroppingDefault('acme/next');
+
+      expect(session.setModel).not.toHaveBeenCalled();
+      expect(setConfig).not.toHaveBeenCalled();
+    });
+  });
+
   it("stages provider-refresh removals and persists one atomic write on atomic-capable harnesses", async () => {
     const registryUrl = "https://registry.example.test/v1/models/api.json";
     const source = { kind: "apiJson", url: registryUrl, apiKey: "sk-test-token" };
