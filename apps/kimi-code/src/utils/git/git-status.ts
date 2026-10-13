@@ -169,6 +169,7 @@ export function createGitStatusCache(
       watcher.on('change', onHeadEvent);
       watcher.on('unlink', onHeadEvent);
       watcher.on('error', onHeadEvent);
+      watcher.once('ready', onHeadEvent);
     } catch {
       watcher = null;
     }
@@ -326,7 +327,9 @@ async function findRepo(workDir: string): Promise<RepoLocation | null> {
   }
 
   const ceilings = ceilingDirectories();
+  const crossFilesystem = discoveryAcrossFilesystem();
   let dir = resolve(workDir);
+  let device = (await tryStat(dir))?.dev;
   for (;;) {
     const dotGit = join(dir, '.git');
     const dotGitStat = await tryStat(dotGit);
@@ -344,8 +347,20 @@ async function findRepo(workDir: string): Promise<RepoLocation | null> {
     if (ceilings.has(normalizeForComparison(dir))) return null;
     const parent = dirname(dir);
     if (parent === dir) return null;
+    if (!crossFilesystem) {
+      const parentDevice = (await tryStat(parent))?.dev;
+      if (device !== undefined && parentDevice !== undefined && parentDevice !== device) {
+        return null;
+      }
+      device = parentDevice ?? device;
+    }
     dir = parent;
   }
+}
+
+function discoveryAcrossFilesystem(): boolean {
+  const raw = process.env['GIT_DISCOVERY_ACROSS_FILESYSTEM']?.trim().toLowerCase();
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
 }
 
 function ceilingDirectories(): ReadonlySet<string> {

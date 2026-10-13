@@ -37,7 +37,7 @@ interface PendingCall {
   readonly callback: ExecCallback;
 }
 
-type FakeEntry = { readonly type: 'file'; content: string } | { readonly type: 'dir' };
+type FakeEntry = { readonly type: 'file'; content: string } | { readonly type: 'dir'; dev?: number };
 
 class FakeWatcher {
   readonly close = vi.fn(() => Promise.resolve());
@@ -48,6 +48,10 @@ class FakeWatcher {
     list.push(listener);
     this.listeners.set(event, list);
     return this;
+  }
+
+  once(event: string, listener: (...args: unknown[]) => void): this {
+    return this.on(event, listener);
   }
 
   emit(event: string): void {
@@ -69,6 +73,7 @@ beforeEach(() => {
   pendingGh = [];
   delete process.env['GIT_DIR'];
   delete process.env['GIT_CEILING_DIRECTORIES'];
+  delete process.env['GIT_DISCOVERY_ACROSS_FILESYSTEM'];
   mocks.resolveCommandPath.mockImplementation((command: string) => `/usr/bin/${command}`);
   mocks.chokidarWatch.mockImplementation(() => {
     const watcher = new FakeWatcher();
@@ -86,6 +91,7 @@ beforeEach(() => {
     const entry = fakeFiles.get(path);
     if (entry === undefined) return Promise.reject(enoent(path));
     return Promise.resolve({
+      dev: entry.type === 'dir' ? (entry.dev ?? 0) : 0,
       isDirectory: () => entry.type === 'dir',
       isFile: () => entry.type === 'file',
     });
@@ -335,6 +341,53 @@ describe('git status cache', () => {
     await flushMicrotasks();
 
     expect(cache.getStatus()?.branch).toBe('main');
+    cache.dispose();
+  });
+
+  it('rereads HEAD on watcher ready to cover checkouts before the initial scan', async () => {
+    writeRepo(workDir);
+    const onChange = vi.fn();
+    const cache = createGitStatusCache(workDir, { onChange });
+    await flushMicrotasks();
+    expect(cache.getStatus()?.branch).toBe('main');
+    onChange.mockClear();
+
+    writeHead(workDir, 'ref: refs/heads/early-checkout\n');
+    watchers[0]!.emit('ready');
+    await flushMicrotasks();
+
+    expect(cache.getStatus()?.branch).toBe('early-checkout');
+    expect(onChange).toHaveBeenCalledTimes(1);
+    cache.dispose();
+  });
+
+  it('stops the walk-up at a filesystem boundary by default', async () => {
+    const root = resolve('/');
+    fakeFiles.set(workDir, { type: 'dir', dev: 1 });
+    fakeFiles.set(resolve('/virtual'), { type: 'dir', dev: 1 });
+    fakeFiles.set(root, { type: 'dir', dev: 2 });
+    writeRepo(root, 'ref: refs/heads/other-device\n');
+
+    const cache = createGitStatusCache(workDir);
+    await flushMicrotasks();
+
+    expect(cache.getStatus()).toBeNull();
+    expect(mocks.chokidarWatch).not.toHaveBeenCalled();
+    cache.dispose();
+  });
+
+  it('crosses a filesystem boundary when GIT_DISCOVERY_ACROSS_FILESYSTEM is set', async () => {
+    const root = resolve('/');
+    fakeFiles.set(workDir, { type: 'dir', dev: 1 });
+    fakeFiles.set(resolve('/virtual'), { type: 'dir', dev: 1 });
+    fakeFiles.set(root, { type: 'dir', dev: 2 });
+    writeRepo(root, 'ref: refs/heads/other-device\n');
+    process.env['GIT_DISCOVERY_ACROSS_FILESYSTEM'] = 'true';
+
+    const cache = createGitStatusCache(workDir);
+    await flushMicrotasks();
+
+    expect(cache.getStatus()?.branch).toBe('other-device');
     cache.dispose();
   });
 
