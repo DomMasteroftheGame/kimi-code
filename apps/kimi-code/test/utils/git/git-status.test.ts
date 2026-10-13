@@ -5,10 +5,17 @@ const mocks = vi.hoisted(() => ({
   execFile: vi.fn(),
   resolveCommandPath: vi.fn(),
   chokidarWatch: vi.fn(),
+  fsStat: vi.fn(),
+  fsReadFile: vi.fn(),
 }));
 
 vi.mock('node:child_process', () => ({
   execFile: mocks.execFile,
+}));
+
+vi.mock('node:fs/promises', () => ({
+  stat: mocks.fsStat,
+  readFile: mocks.fsReadFile,
 }));
 
 vi.mock('#/utils/process/resolve-command', () => ({
@@ -19,9 +26,7 @@ vi.mock('chokidar', () => ({
   watch: mocks.chokidarWatch,
 }));
 
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 import { createGitStatusCache, formatGitBadge } from '#/utils/git/git-status';
 
@@ -31,6 +36,8 @@ interface PendingCall {
   readonly args: string[];
   readonly callback: ExecCallback;
 }
+
+type FakeEntry = { readonly type: 'file'; content: string } | { readonly type: 'dir' };
 
 class FakeWatcher {
   readonly close = vi.fn(() => Promise.resolve());
@@ -48,13 +55,15 @@ class FakeWatcher {
   }
 }
 
-let workDir: string;
+const workDir = resolve('/virtual/repo');
+const fakeFiles = new Map<string, FakeEntry>();
+
 let watchers: FakeWatcher[];
 let pendingGit: PendingCall[];
 let pendingGh: PendingCall[];
 
 beforeEach(() => {
-  workDir = realpathSync(mkdtempSync(join(tmpdir(), 'git-status-')));
+  fakeFiles.clear();
   watchers = [];
   pendingGit = [];
   pendingGh = [];
@@ -71,17 +80,39 @@ beforeEach(() => {
       else pendingGh.push(call);
     },
   );
+  mocks.fsStat.mockImplementation((path: string) => {
+    const entry = fakeFiles.get(path);
+    if (entry === undefined) return Promise.reject(enoent(path));
+    return Promise.resolve({
+      isDirectory: () => entry.type === 'dir',
+      isFile: () => entry.type === 'file',
+    });
+  });
+  mocks.fsReadFile.mockImplementation((path: string) => {
+    const entry = fakeFiles.get(path);
+    if (entry === undefined || entry.type !== 'file') return Promise.reject(enoent(path));
+    return Promise.resolve(entry.content);
+  });
 });
 
 afterEach(() => {
-  rmSync(workDir, { recursive: true, force: true });
   vi.useRealTimers();
   vi.clearAllMocks();
 });
 
+function enoent(path: string): NodeJS.ErrnoException {
+  const error = new Error(`ENOENT: no such file or directory: ${path}`) as NodeJS.ErrnoException;
+  error.code = 'ENOENT';
+  return error;
+}
+
 function writeRepo(dir: string, head = 'ref: refs/heads/main\n'): void {
-  mkdirSync(join(dir, '.git'), { recursive: true });
-  writeFileSync(join(dir, '.git', 'HEAD'), head);
+  fakeFiles.set(join(dir, '.git'), { type: 'dir' });
+  fakeFiles.set(join(dir, '.git', 'HEAD'), { type: 'file', content: head });
+}
+
+function writeHead(dir: string, content: string): void {
+  fakeFiles.set(join(dir, '.git', 'HEAD'), { type: 'file', content });
 }
 
 function answer(call: PendingCall, result: string | Error): void {
@@ -118,14 +149,17 @@ const STATUS_DIRTY = '## main...origin/main [ahead 2, behind 1]\n M src/app.ts\n
 const DIFF_DIRTY = '4\t1\tsrc/app.ts\n';
 
 describe('git status cache', () => {
-  it('shows the branch on the first frame and fills in stats asynchronously', async () => {
+  it('shows the branch after the initial async probe and fills in stats asynchronously', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-04-24T00:00:00Z'));
     writeRepo(workDir);
     const onChange = vi.fn();
 
     const cache = createGitStatusCache(workDir, { onChange });
+    expect(cache.getStatus()).toBeNull();
+    await flushMicrotasks();
 
+    expect(onChange).toHaveBeenCalledTimes(1);
     expect(cache.getStatus()).toEqual({
       branch: 'main',
       dirty: false,
@@ -135,9 +169,10 @@ describe('git status cache', () => {
       diffDeleted: 0,
       pullRequest: null,
     });
-    expect(onChange).not.toHaveBeenCalled();
-    expect(pendingGit).toHaveLength(1);
 
+    onChange.mockClear();
+    cache.getStatus();
+    expect(pendingGit).toHaveLength(1);
     answerGh(new Error('no pull request'));
     await answerGitRound(STATUS_DIRTY, DIFF_DIRTY);
 
@@ -160,6 +195,8 @@ describe('git status cache', () => {
     writeRepo(workDir);
     const onChange = vi.fn();
     const cache = createGitStatusCache(workDir, { onChange });
+    await flushMicrotasks();
+    onChange.mockClear();
 
     cache.getStatus();
     answerGh(new Error('no pull request'));
@@ -190,6 +227,7 @@ describe('git status cache', () => {
 
     vi.setSystemTime(new Date('2026-04-24T00:01:02Z'));
     cache.getStatus();
+    answerGh(new Error('no pull request'));
     await answerGitRound(
       '## main...origin/main [ahead 3, behind 1]\n M src/app.ts\n',
       '9\t1\tsrc/app.ts\n',
@@ -203,6 +241,7 @@ describe('git status cache', () => {
     vi.setSystemTime(new Date('2026-04-24T00:00:00Z'));
     writeRepo(workDir);
     const cache = createGitStatusCache(workDir);
+    await flushMicrotasks();
 
     cache.getStatus();
     answerGh(new Error('no pull request'));
@@ -216,12 +255,13 @@ describe('git status cache', () => {
     cache.dispose();
   });
 
-  it('rereads the branch immediately on HEAD watcher events and debounces stats refreshes', async () => {
+  it('rereads the branch on HEAD watcher events and debounces stats refreshes', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-04-24T00:00:00Z'));
     writeRepo(workDir);
     const onChange = vi.fn();
     const cache = createGitStatusCache(workDir, { onChange });
+    await flushMicrotasks();
 
     cache.getStatus();
     answerGh(new Error('no pull request'));
@@ -232,43 +272,46 @@ describe('git status cache', () => {
       expect.objectContaining({ usePolling: true, interval: 1000, ignoreInitial: true }),
     );
 
-    writeFileSync(join(workDir, '.git', 'HEAD'), 'ref: refs/heads/feature\n');
+    writeHead(workDir, 'ref: refs/heads/feature\n');
     onChange.mockClear();
     watchers[0]!.emit('change');
+    await flushMicrotasks();
 
     expect(cache.getStatus()?.branch).toBe('feature');
     expect(onChange).toHaveBeenCalledTimes(1);
 
     watchers[0]!.emit('change');
     watchers[0]!.emit('change');
+    await flushMicrotasks();
     vi.advanceTimersByTime(999);
     expect(pendingGit).toHaveLength(0);
     vi.advanceTimersByTime(1);
     expect(pendingGit).toHaveLength(1);
 
     await answerGitRound(STATUS_DIRTY, DIFF_DIRTY);
-    writeFileSync(join(workDir, '.git', 'HEAD'), 'ref: refs/heads/from-error-event\n');
+    writeHead(workDir, 'ref: refs/heads/from-error-event\n');
     watchers[0]!.emit('error');
+    await flushMicrotasks();
     expect(cache.getStatus()?.branch).toBe('from-error-event');
     cache.dispose();
   });
 
-  it('shows the short sha for a detached HEAD', () => {
+  it('shows the short sha for a detached HEAD', async () => {
     writeRepo(workDir, `${'a'.repeat(40)}\n`);
     const cache = createGitStatusCache(workDir);
+    await flushMicrotasks();
     expect(cache.getStatus()?.branch).toBe('aaaaaaa');
     cache.dispose();
   });
 
-  it('resolves a relative gitdir pointer file with a BOM', () => {
+  it('resolves a relative gitdir pointer file with a BOM', async () => {
     const gitDir = join(workDir, 'real-git');
-    mkdirSync(gitDir, { recursive: true });
-    writeFileSync(join(gitDir, 'HEAD'), 'ref: refs/heads/worktree\n');
+    fakeFiles.set(join(gitDir, 'HEAD'), { type: 'file', content: 'ref: refs/heads/worktree\n' });
     const worktree = join(workDir, 'wt');
-    mkdirSync(worktree);
-    writeFileSync(join(worktree, '.git'), '\uFEFFgitdir: ../real-git\n');
+    fakeFiles.set(join(worktree, '.git'), { type: 'file', content: '\uFEFFgitdir: ../real-git\n' });
 
     const cache = createGitStatusCache(worktree);
+    await flushMicrotasks();
     expect(cache.getStatus()?.branch).toBe('worktree');
     expect(mocks.chokidarWatch).toHaveBeenCalledWith(
       join(gitDir, 'HEAD'),
@@ -277,31 +320,39 @@ describe('git status cache', () => {
     cache.dispose();
   });
 
-  it('finds the repository by walking up from a nested directory', () => {
+  it('finds the repository by walking up from a nested directory', async () => {
     writeRepo(workDir, 'ref: refs/heads/parent\n');
     const nested = join(workDir, 'sub', 'deep');
-    mkdirSync(nested, { recursive: true });
 
     const cache = createGitStatusCache(nested);
+    await flushMicrotasks();
     expect(cache.getStatus()?.branch).toBe('parent');
     cache.dispose();
   });
 
-  it('returns null outside a repo without spawning or watching, and picks up git init within a TTL cycle', () => {
+  it('returns null outside a repo without spawning or watching, and picks up git init within a TTL cycle', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-04-24T00:00:00Z'));
-    const cache = createGitStatusCache(workDir);
+    const onChange = vi.fn();
+    const cache = createGitStatusCache(workDir, { onChange });
 
     expect(cache.getStatus()).toBeNull();
+    await flushMicrotasks();
     expect(pendingGit).toHaveLength(0);
     expect(pendingGh).toHaveLength(0);
     expect(mocks.chokidarWatch).not.toHaveBeenCalled();
+    expect(onChange).not.toHaveBeenCalled();
 
     writeRepo(workDir);
     vi.setSystemTime(new Date('2026-04-24T00:00:10Z'));
     expect(cache.getStatus()).toBeNull();
+    await flushMicrotasks();
+    expect(cache.getStatus()).toBeNull();
 
     vi.setSystemTime(new Date('2026-04-24T00:00:31Z'));
+    expect(cache.getStatus()).toBeNull();
+    await flushMicrotasks();
+    expect(onChange).toHaveBeenCalledTimes(1);
     expect(cache.getStatus()?.branch).toBe('main');
     expect(mocks.chokidarWatch).toHaveBeenCalledTimes(1);
     cache.dispose();
@@ -311,13 +362,16 @@ describe('git status cache', () => {
     writeRepo(workDir);
     const onChange = vi.fn();
     const cache = createGitStatusCache(workDir, { onChange });
+    await flushMicrotasks();
     expect(cache.getStatus()).not.toBeNull();
+    cache.getStatus();
     answerGh(new Error('no pull request'));
     await answerGitRound(new Error('never'));
     onChange.mockClear();
 
-    rmSync(join(workDir, '.git', 'HEAD'));
+    fakeFiles.delete(join(workDir, '.git', 'HEAD'));
     watchers[0]!.emit('unlink');
+    await flushMicrotasks();
 
     expect(cache.getStatus()).toBeNull();
     expect(onChange).toHaveBeenCalledTimes(1);
@@ -331,6 +385,7 @@ describe('git status cache', () => {
     writeRepo(workDir);
     const onChange = vi.fn();
     const cache = createGitStatusCache(workDir, { onChange });
+    await flushMicrotasks();
 
     cache.getStatus();
     answerGh(new Error('no pull request'));
@@ -348,6 +403,7 @@ describe('git status cache', () => {
     vi.setSystemTime(new Date('2026-04-24T00:01:02Z'));
     cache.getStatus();
     expect(pendingGit).toHaveLength(1);
+    answerGh(new Error('no pull request'));
     await answerGitRound(STATUS_DIRTY, DIFF_DIRTY);
     expect(cache.getStatus()?.diffAdded).toBe(4);
     cache.dispose();
@@ -357,6 +413,7 @@ describe('git status cache', () => {
     mocks.resolveCommandPath.mockReturnValue(undefined);
     writeRepo(workDir);
     const cache = createGitStatusCache(workDir);
+    await flushMicrotasks();
 
     expect(cache.getStatus()).toEqual({
       branch: 'main',
@@ -376,11 +433,13 @@ describe('git status cache', () => {
   it('spawns git and gh through their resolved absolute paths', async () => {
     writeRepo(workDir);
     const cache = createGitStatusCache(workDir);
+    await flushMicrotasks();
     cache.getStatus();
     answerGh(new Error('no pull request'));
     await answerGitRound('## main...origin/main\n');
 
     expect(mocks.resolveCommandPath).toHaveBeenCalledWith('git', workDir);
+    expect(mocks.resolveCommandPath).toHaveBeenCalledWith('gh', workDir);
     const gitCalls = mocks.execFile.mock.calls.filter(([cmd]) => cmd === '/usr/bin/git');
     expect(gitCalls).toHaveLength(1);
     expect(gitCalls[0]).toEqual([
@@ -402,8 +461,11 @@ describe('git status cache', () => {
     writeRepo(workDir, 'ref: refs/heads/feature/footer\n');
     const onChange = vi.fn();
     const cache = createGitStatusCache(workDir, { onChange });
+    await flushMicrotasks();
+    onChange.mockClear();
 
     expect(cache.getStatus()?.pullRequest).toBeNull();
+    cache.getStatus();
     answerGh('{"number":12,"url":"https://github.com/acme/repo/pull/12"}\n');
     await answerGitRound(
       '## feature/footer...origin/feature/footer\n M src/app.ts\n',
@@ -439,8 +501,10 @@ describe('git status cache', () => {
       },
     );
     const cache = createGitStatusCache(workDir, { onChange });
+    await flushMicrotasks();
 
     expect(cache.getStatus()?.branch).toBe('main');
+    cache.getStatus();
     await answerGitRound('## main...origin/main\n M src/app.ts\n', '2\t1\tsrc/app.ts\n');
 
     expect(cache.getStatus()).toEqual({
@@ -461,17 +525,19 @@ describe('git status cache', () => {
     writeRepo(workDir);
     const onChange = vi.fn();
     const cache = createGitStatusCache(workDir, { onChange });
+    await flushMicrotasks();
 
     cache.getStatus();
     expect(pendingGit).toHaveLength(1);
     onChange.mockClear();
 
-    writeFileSync(join(workDir, '.git', 'HEAD'), 'garbage\n');
+    writeHead(workDir, 'garbage\n');
     watchers[0]!.emit('change');
     cache.dispose();
     expect(watchers[0]!.close).toHaveBeenCalledTimes(1);
 
     vi.advanceTimersByTime(5_000);
+    await flushMicrotasks();
     expect(pendingGit).toHaveLength(1);
 
     answerGh(new Error('no pull request'));
@@ -480,9 +546,10 @@ describe('git status cache', () => {
     expect(cache.getStatus()).toBeNull();
   });
 
-  it('treats a .git directory without HEAD as a non-repo', () => {
-    mkdirSync(join(workDir, '.git'), { recursive: true });
+  it('treats a .git directory without HEAD as a non-repo', async () => {
+    fakeFiles.set(join(workDir, '.git'), { type: 'dir' });
     const cache = createGitStatusCache(workDir);
+    await flushMicrotasks();
 
     expect(cache.getStatus()).toBeNull();
     expect(pendingGit).toHaveLength(0);
@@ -496,24 +563,28 @@ describe('git status cache', () => {
     writeRepo(workDir);
     const onChange = vi.fn();
     const cache = createGitStatusCache(workDir, { onChange });
+    await flushMicrotasks();
 
     cache.getStatus();
     answerGh(new Error('no pull request'));
     await answerGitRound('## main...origin/main\n');
     onChange.mockClear();
 
-    writeFileSync(join(workDir, '.git', 'HEAD'), 'garbage\n');
+    writeHead(workDir, 'garbage\n');
     watchers[0]!.emit('change');
+    await flushMicrotasks();
     expect(cache.getStatus()?.branch).toBe('main');
     expect(onChange).not.toHaveBeenCalled();
     expect(watchers[0]!.close).not.toHaveBeenCalled();
 
     vi.advanceTimersByTime(1_000);
+    await flushMicrotasks();
     expect(cache.getStatus()?.branch).toBe('main');
     expect(onChange).not.toHaveBeenCalled();
 
-    writeFileSync(join(workDir, '.git', 'HEAD'), 'ref: refs/heads/recovered\n');
+    writeHead(workDir, 'ref: refs/heads/recovered\n');
     watchers[0]!.emit('change');
+    await flushMicrotasks();
     expect(cache.getStatus()?.branch).toBe('recovered');
     expect(onChange).toHaveBeenCalledTimes(1);
     cache.dispose();

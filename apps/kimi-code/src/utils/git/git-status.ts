@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
-import { readFileSync, statSync, type Stats } from 'node:fs';
+import type { Stats } from 'node:fs';
+import { readFile, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 import { watch, type FSWatcher } from 'chokidar';
@@ -69,8 +70,10 @@ export function createGitStatusCache(
   options: GitStatusCacheOptions = {},
 ): GitStatusCache {
   const git = resolveCommandPath('git', workDir);
+  const gh = resolveCommandPath('gh', workDir);
   let repo: RepoState | null = null;
   let watcher: FSWatcher | null = null;
+  let probeInFlight = false;
   let nonRepoProbedAt = 0;
   let stats: StatsState = {
     dirty: false,
@@ -90,19 +93,20 @@ export function createGitStatusCache(
   let statsRefreshRunning = false;
   let statsRefreshPending = false;
   let statsDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  let branchRereadRunning = false;
+  let branchRereadPending = false;
   let branchRetryTimer: ReturnType<typeof setTimeout> | null = null;
   let disposed = false;
 
-  probe();
+  requestProbe();
 
   return {
     getStatus: () => {
       if (disposed) return null;
       const now = Date.now();
       if (repo === null) {
-        if (now - nonRepoProbedAt < STATUS_TTL_MS) return null;
-        probe();
-        if (repo === null) return null;
+        if (now - nonRepoProbedAt >= STATUS_TTL_MS) requestProbe();
+        return null;
       }
       if (now - stats.fetchedAt >= STATUS_TTL_MS) requestStatsRefresh();
       refreshPullRequestIfNeeded(repo.branch, now);
@@ -134,16 +138,29 @@ export function createGitStatusCache(
     },
   };
 
-  function probe(): void {
-    const found = findRepo(workDir);
-    if (found === null) {
-      nonRepoProbedAt = Date.now();
-      return;
-    }
-    repo = { headPath: found.headPath, branch: found.branch };
-    stats = { dirty: false, ahead: 0, behind: 0, diffAdded: 0, diffDeleted: 0, fetchedAt: 0 };
+  function requestProbe(): void {
+    if (disposed || repo !== null || probeInFlight) return;
+    probeInFlight = true;
+    nonRepoProbedAt = Date.now();
+    void runProbe();
+  }
+
+  async function runProbe(): Promise<void> {
     try {
-      watcher = watch(found.headPath, {
+      const found = await findRepo(workDir);
+      if (disposed || repo !== null || found === null) return;
+      repo = { headPath: found.headPath, branch: found.branch };
+      stats = { dirty: false, ahead: 0, behind: 0, diffAdded: 0, diffDeleted: 0, fetchedAt: 0 };
+      startWatcher(found.headPath);
+      options.onChange?.();
+    } finally {
+      probeInFlight = false;
+    }
+  }
+
+  function startWatcher(headPath: string): void {
+    try {
+      watcher = watch(headPath, {
         usePolling: true,
         interval: HEAD_POLL_INTERVAL_MS,
         ignoreInitial: true,
@@ -170,34 +187,32 @@ export function createGitStatusCache(
   }
 
   function onHeadEvent(): void {
-    if (disposed || repo === null) return;
-    const branch = readHeadBranch(repo.headPath);
-    if (branch === null) {
-      if (pathMissing(repo.headPath)) {
-        becomeNonRepo();
-        options.onChange?.();
-      } else {
-        scheduleBranchRetry();
-      }
-      return;
-    }
-    if (branch !== repo.branch) {
-      repo.branch = branch;
-      options.onChange?.();
-    }
-    scheduleStatsRefresh();
+    requestBranchReread(false);
   }
 
-  function scheduleBranchRetry(): void {
-    if (branchRetryTimer !== null) return;
-    branchRetryTimer = setTimeout(() => {
-      branchRetryTimer = null;
+  function requestBranchReread(fromRetry: boolean): void {
+    if (disposed || repo === null) return;
+    if (branchRereadRunning) {
+      branchRereadPending = true;
+      return;
+    }
+    branchRereadRunning = true;
+    void runBranchReread(fromRetry);
+  }
+
+  async function runBranchReread(fromRetry: boolean): Promise<void> {
+    try {
+      const current = repo;
+      if (current === null) return;
+      const branch = await readHeadBranch(current.headPath);
       if (disposed || repo === null) return;
-      const branch = readHeadBranch(repo.headPath);
       if (branch === null) {
-        if (pathMissing(repo.headPath)) {
+        if (await pathMissing(current.headPath)) {
+          if (disposed || repo === null) return;
           becomeNonRepo();
           options.onChange?.();
+        } else if (!fromRetry) {
+          scheduleBranchRetry();
         }
         return;
       }
@@ -205,7 +220,21 @@ export function createGitStatusCache(
         repo.branch = branch;
         options.onChange?.();
       }
-      requestStatsRefresh();
+      scheduleStatsRefresh();
+    } finally {
+      branchRereadRunning = false;
+      if (branchRereadPending && !disposed) {
+        branchRereadPending = false;
+        requestBranchReread(false);
+      }
+    }
+  }
+
+  function scheduleBranchRetry(): void {
+    if (branchRetryTimer !== null) return;
+    branchRetryTimer = setTimeout(() => {
+      branchRetryTimer = null;
+      requestBranchReread(true);
     }, HEAD_POLL_INTERVAL_MS);
     branchRetryTimer.unref?.();
   }
@@ -260,7 +289,7 @@ export function createGitStatusCache(
       requestId,
     };
 
-    void readPullRequest(workDir).then((value) => {
+    void readPullRequest(gh, workDir).then((value) => {
       if (disposed || pullRequest.requestId !== requestId) return;
 
       const previous = pullRequest.branch === branchName ? pullRequest.value : null;
@@ -282,20 +311,20 @@ interface RepoLocation {
   readonly branch: string;
 }
 
-function findRepo(workDir: string): RepoLocation | null {
+async function findRepo(workDir: string): Promise<RepoLocation | null> {
   let dir = resolve(workDir);
   for (;;) {
     const dotGit = join(dir, '.git');
-    const stat = tryStat(dotGit);
-    if (stat !== null) {
-      const gitDir = stat.isDirectory()
+    const dotGitStat = await tryStat(dotGit);
+    if (dotGitStat !== null) {
+      const gitDir = dotGitStat.isDirectory()
         ? dotGit
-        : stat.isFile()
-          ? readGitdirPointer(dotGit, dir)
+        : dotGitStat.isFile()
+          ? await readGitdirPointer(dotGit, dir)
           : null;
       if (gitDir === null) return null;
       const headPath = join(gitDir, 'HEAD');
-      const branch = readHeadBranch(headPath);
+      const branch = await readHeadBranch(headPath);
       return branch === null ? null : { headPath, branch };
     }
     const parent = dirname(dir);
@@ -304,17 +333,17 @@ function findRepo(workDir: string): RepoLocation | null {
   }
 }
 
-function tryStat(path: string): Stats | null {
+async function tryStat(path: string): Promise<Stats | null> {
   try {
-    return statSync(path);
+    return await stat(path);
   } catch {
     return null;
   }
 }
 
-function pathMissing(path: string): boolean {
+async function pathMissing(path: string): Promise<boolean> {
   try {
-    statSync(path);
+    await stat(path);
     return false;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
@@ -322,10 +351,10 @@ function pathMissing(path: string): boolean {
   }
 }
 
-function readGitdirPointer(dotGit: string, dir: string): string | null {
+async function readGitdirPointer(dotGit: string, dir: string): Promise<string | null> {
   let content: string;
   try {
-    content = readFileSync(dotGit, 'utf8');
+    content = await readFile(dotGit, 'utf8');
   } catch {
     return null;
   }
@@ -336,10 +365,10 @@ function readGitdirPointer(dotGit: string, dir: string): string | null {
   return isAbsolute(target) ? target : resolve(dir, target);
 }
 
-function readHeadBranch(headPath: string): string | null {
+async function readHeadBranch(headPath: string): Promise<string | null> {
   let content: string;
   try {
-    content = readFileSync(headPath, 'utf8');
+    content = await readFile(headPath, 'utf8');
   } catch {
     return null;
   }
@@ -443,9 +472,8 @@ function parseDiffNumstatCount(value: string | undefined): number {
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
-function readPullRequest(workDir: string): Promise<PullRequestInfo | null> {
+function readPullRequest(gh: string | undefined, workDir: string): Promise<PullRequestInfo | null> {
   return new Promise((resolvePromise) => {
-    const gh = resolveCommandPath('gh', workDir);
     if (gh === undefined) {
       resolvePromise(null);
       return;
