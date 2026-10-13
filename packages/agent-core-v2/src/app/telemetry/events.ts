@@ -617,7 +617,7 @@ export const telemetryEventDefinitions = {
   environment_disconnected: defineTelemetryEvent<{
     environment_type: 'ssh' | 'docker' | 'command';
     uptime_ms: number;
-    reason: 'eof' | 'pipe_error' | 'protocol_error' | 'client_closed' | 'other';
+    reason: 'eof' | 'pipe_error' | 'protocol_error' | 'client_closed' | 'liveness' | 'other';
   }>({
     owner: 'kimi-code',
     comment: 'An established remote environment connection unexpectedly closes.',

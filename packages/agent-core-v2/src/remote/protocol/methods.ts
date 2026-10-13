@@ -1,4 +1,5 @@
 export const INITIALIZE_METHOD = 'initialize';
+export const PING_METHOD = 'ping';
 
 export const FS_READ_FILE_METHOD = 'fs/readFile';
 export const FS_WRITE_FILE_METHOD = 'fs/writeFile';

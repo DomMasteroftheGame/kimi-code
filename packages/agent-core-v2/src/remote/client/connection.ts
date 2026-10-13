@@ -1,5 +1,5 @@
 import { encodeFrame, LineFrameDecoder } from '#/remote/protocol/codec';
-import { RpcError } from '#/remote/protocol/errors';
+import { RpcError, RpcErrorCode } from '#/remote/protocol/errors';
 import {
   classifyMessage,
   isErrorResponse,
@@ -13,6 +13,7 @@ import {
   compareVersions,
   INITIALIZE_METHOD,
   MIN_EXECUTOR_VERSION,
+  PING_METHOD,
   PROCESS_WRITE_METHOD,
   SERVER_NOTIFICATION_METHODS,
   type InitializeResult,
@@ -22,6 +23,8 @@ import type { BytePipe } from './execBridge';
 
 export const DEFAULT_INITIALIZE_TIMEOUT_MS = 10_000;
 export const DEFAULT_REQUEST_CALL_TIMEOUT_MS = 60_000;
+export const DEFAULT_LIVENESS_INTERVAL_MS = 30_000;
+export const DEFAULT_LIVENESS_TIMEOUT_MS = 10_000;
 
 export interface ConnectOptions {
   readonly clientName: string;
@@ -29,11 +32,13 @@ export interface ConnectOptions {
   readonly minExecutorVersion?: string;
   readonly initializeTimeoutMs?: number;
   readonly requestCallTimeoutMs?: number;
+  readonly livenessIntervalMs?: number;
+  readonly livenessTimeoutMs?: number;
 }
 
 export interface ConnectionCloseInfo {
   readonly reason: string;
-  readonly kind?: 'eof' | 'pipe_error' | 'protocol_error' | 'client_closed' | 'other';
+  readonly kind?: 'eof' | 'pipe_error' | 'protocol_error' | 'client_closed' | 'liveness' | 'other';
 }
 
 export class ConnectionClosedError extends Error {
@@ -96,6 +101,12 @@ export class RemoteExecConnection {
   private handshakeTimer: NodeJS.Timeout | undefined;
   private requestCallTimeoutMs = DEFAULT_REQUEST_CALL_TIMEOUT_MS;
   private closeInfo: ConnectionCloseInfo | undefined;
+  private livenessIntervalMs = DEFAULT_LIVENESS_INTERVAL_MS;
+  private livenessTimeoutMs = DEFAULT_LIVENESS_TIMEOUT_MS;
+  private livenessTimer: NodeJS.Timeout | undefined;
+  private pongTimer: NodeJS.Timeout | undefined;
+  private pingInFlight = false;
+  private lastInboundAt = Date.now();
 
   private constructor(private readonly pipe: BytePipe) {}
 
@@ -127,6 +138,8 @@ export class RemoteExecConnection {
     return new Promise<RemoteExecConnection>((resolve, reject) => {
       const timeoutMs = options.initializeTimeoutMs ?? DEFAULT_INITIALIZE_TIMEOUT_MS;
       this.requestCallTimeoutMs = options.requestCallTimeoutMs ?? DEFAULT_REQUEST_CALL_TIMEOUT_MS;
+      this.livenessIntervalMs = options.livenessIntervalMs ?? DEFAULT_LIVENESS_INTERVAL_MS;
+      this.livenessTimeoutMs = options.livenessTimeoutMs ?? DEFAULT_LIVENESS_TIMEOUT_MS;
       this.handshakeTimer = setTimeout(() => {
         this.fail(new HandshakeError(`initialize timed out after ${timeoutMs}ms`, { kind: 'timeout' }));
       }, timeoutMs);
@@ -154,6 +167,7 @@ export class RemoteExecConnection {
           return;
         }
         this.state = 'ready';
+        this.startLiveness();
         resolve(this);
       };
 
@@ -305,8 +319,61 @@ export class RemoteExecConnection {
     this.fail(new ConnectionClosedError('connection closed by client'), 'client_closed');
   }
 
+  private startLiveness(): void {
+    this.livenessTimer = setInterval(() => {
+      this.onLivenessTick();
+    }, this.livenessIntervalMs);
+    this.livenessTimer.unref?.();
+  }
+
+  private stopLiveness(): void {
+    if (this.livenessTimer !== undefined) {
+      clearInterval(this.livenessTimer);
+      this.livenessTimer = undefined;
+    }
+    if (this.pongTimer !== undefined) {
+      clearTimeout(this.pongTimer);
+      this.pongTimer = undefined;
+    }
+    this.pingInFlight = false;
+  }
+
+  private onLivenessTick(): void {
+    if (this.state !== 'ready' || this.pingInFlight) return;
+    if (Date.now() - this.lastInboundAt < this.livenessIntervalMs) return;
+    this.pingInFlight = true;
+    this.pongTimer = setTimeout(() => {
+      this.fail(
+        new ConnectionClosedError(`liveness ping timed out after ${this.livenessTimeoutMs}ms`),
+        'liveness',
+      );
+    }, this.livenessTimeoutMs);
+    this.pongTimer.unref?.();
+    this.call(PING_METHOD).then(
+      () => {
+        this.settlePing();
+      },
+      (error: unknown) => {
+        if (error instanceof RpcError && error.code === RpcErrorCode.MethodNotFound) {
+          this.stopLiveness();
+          return;
+        }
+        this.settlePing();
+      },
+    );
+  }
+
+  private settlePing(): void {
+    if (this.pongTimer !== undefined) {
+      clearTimeout(this.pongTimer);
+      this.pongTimer = undefined;
+    }
+    this.pingInFlight = false;
+  }
+
   private onData(chunk: Uint8Array): void {
     if (this.closed) return;
+    this.lastInboundAt = Date.now();
     let frames: unknown[];
     try {
       frames = this.decoder.push(chunk);
@@ -388,6 +455,7 @@ export class RemoteExecConnection {
       clearTimeout(this.handshakeTimer);
       this.handshakeTimer = undefined;
     }
+    this.stopLiveness();
     if (!this.handshakeComplete) {
       this.onHandshakeResponse(error);
     }

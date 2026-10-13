@@ -11,6 +11,7 @@ import {
   FS_GET_METADATA_METHOD,
   FS_READ_FILE_METHOD,
   INITIALIZE_METHOD,
+  PING_METHOD,
   PROCESS_CLOSED_METHOD,
   PROCESS_EXITED_METHOD,
   PROCESS_OUTPUT_METHOD,
@@ -320,6 +321,133 @@ describe('initialize timeout default', () => {
     await vi.advanceTimersByTimeAsync(11_000);
     await message;
     await kind;
+  });
+});
+
+describe('liveness heartbeat', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('answers ping with an empty result', async () => {
+    const loopback = createInProcessLoopback();
+    const raw = new RawClient(loopback);
+    await raw.handshake();
+    raw.send({ id: 2, method: PING_METHOD });
+    const response = await raw.nextResponse(2);
+    expect(response['result']).toEqual({});
+    loopback.clientInput.end();
+    await loopback.host.done;
+  });
+
+  it('sends a liveness ping after the idle interval', async () => {
+    vi.useFakeTimers();
+    const seen: ScriptedFrame[] = [];
+    const pipe = createScriptedServer((frame, reply) => {
+      if (frame.method === INITIALIZE_METHOD) {
+        reply({ id: frame.id, result: testInitializeResult() });
+        return;
+      }
+      seen.push(frame);
+      if (frame.method === PING_METHOD) {
+        reply({ id: frame.id, result: {} });
+      }
+    });
+    const connection = await RemoteExecConnection.connect(pipe, {
+      clientName: 'test',
+      clientVersion: '0.0.0',
+      livenessIntervalMs: 100,
+      livenessTimeoutMs: 50,
+    });
+    await vi.advanceTimersByTimeAsync(350);
+    expect(seen.filter((frame) => frame.method === PING_METHOD).length).toBeGreaterThan(0);
+    expect(connection.closed).toBe(false);
+    connection.close();
+  });
+
+  it('does not ping while responses keep arriving', async () => {
+    vi.useFakeTimers();
+    const seen: ScriptedFrame[] = [];
+    const pipe = createScriptedServer((frame, reply) => {
+      if (frame.method === INITIALIZE_METHOD) {
+        reply({ id: frame.id, result: testInitializeResult() });
+        return;
+      }
+      seen.push(frame);
+      if (frame.method === FS_GET_METADATA_METHOD) {
+        reply({ id: frame.id, result: { isDirectory: true } });
+      }
+      if (frame.method === PING_METHOD) {
+        reply({ id: frame.id, result: {} });
+      }
+    });
+    const connection = await RemoteExecConnection.connect(pipe, {
+      clientName: 'test',
+      clientVersion: '0.0.0',
+      livenessIntervalMs: 100,
+      livenessTimeoutMs: 50,
+    });
+    for (let i = 0; i < 4; i += 1) {
+      await vi.advanceTimersByTimeAsync(80);
+      await expect(connection.call(FS_GET_METADATA_METHOD, { path: '/' })).resolves.toMatchObject({
+        isDirectory: true,
+      });
+    }
+    expect(seen.filter((frame) => frame.method === PING_METHOD)).toHaveLength(0);
+    connection.close();
+  });
+
+  it('closes the connection and fails pending calls when the pong does not arrive', async () => {
+    vi.useFakeTimers();
+    const pipe = createScriptedServer((frame, reply) => {
+      if (frame.method === INITIALIZE_METHOD) {
+        reply({ id: frame.id, result: testInitializeResult() });
+      }
+    });
+    const connection = await RemoteExecConnection.connect(pipe, {
+      clientName: 'test',
+      clientVersion: '0.0.0',
+      livenessIntervalMs: 100,
+      livenessTimeoutMs: 50,
+    });
+    const stalled = connection.call(FS_READ_FILE_METHOD, { path: '/x' });
+    const rejection = expect(stalled).rejects.toThrow(ConnectionClosedError);
+    await vi.advanceTimersByTimeAsync(200);
+    await rejection;
+    expect(connection.closed).toBe(true);
+    expect(connection.closeReason?.reason).toMatch(/liveness ping timed out/);
+    expect(connection.closeReason?.kind).toBe('liveness');
+  });
+
+  it('disables the heartbeat when the executor does not know ping', async () => {
+    vi.useFakeTimers();
+    const seen: ScriptedFrame[] = [];
+    const pipe = createScriptedServer((frame, reply) => {
+      if (frame.method === INITIALIZE_METHOD) {
+        reply({ id: frame.id, result: testInitializeResult() });
+        return;
+      }
+      seen.push(frame);
+      if (frame.method === PING_METHOD) {
+        reply({ id: frame.id, error: { code: -32601, message: 'unknown method ping' } });
+      }
+      if (frame.method === FS_GET_METADATA_METHOD) {
+        reply({ id: frame.id, result: { isDirectory: true } });
+      }
+    });
+    const connection = await RemoteExecConnection.connect(pipe, {
+      clientName: 'test',
+      clientVersion: '0.0.0',
+      livenessIntervalMs: 100,
+      livenessTimeoutMs: 50,
+    });
+    await vi.advanceTimersByTimeAsync(350);
+    expect(seen.filter((frame) => frame.method === PING_METHOD)).toHaveLength(1);
+    expect(connection.closed).toBe(false);
+    await expect(connection.call(FS_GET_METADATA_METHOD, { path: '/' })).resolves.toMatchObject({
+      isDirectory: true,
+    });
+    connection.close();
   });
 });
 

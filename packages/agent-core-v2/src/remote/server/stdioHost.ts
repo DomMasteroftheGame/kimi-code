@@ -23,6 +23,7 @@ import {
   INITIALIZE_METHOD,
   MAX_IN_FLIGHT_CALLS,
   MAX_PENDING_SEND_BYTES,
+  PING_METHOD,
   PROCESS_FLOW_METHOD,
   PROCESS_SIGNAL_METHOD,
   PROCESS_START_METHOD,
@@ -46,6 +47,7 @@ type Lane = 'control' | 'data';
 type Handler = (params: unknown) => Promise<unknown>;
 
 const CONTROL_METHODS: ReadonlySet<string> = new Set([
+  PING_METHOD,
   PROCESS_WRITE_METHOD,
   PROCESS_SIGNAL_METHOD,
 ]);
@@ -154,6 +156,7 @@ export class StdioHost {
     const fs = this.fsHandler;
     const pm = this.processManager;
     this.handlers = new Map<string, Handler>([
+      [PING_METHOD, () => Promise.resolve({})],
       [FS_READ_FILE_METHOD, (p) => fs.readFile(p)],
       [FS_WRITE_FILE_METHOD, (p) => fs.writeFile(p)],
       [FS_CREATE_DIRECTORY_METHOD, (p) => fs.createDirectory(p)],
