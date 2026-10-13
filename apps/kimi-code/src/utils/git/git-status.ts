@@ -51,8 +51,6 @@ interface StatsState {
 interface RepoState {
   headPath: string;
   readonly gitfilePath: string | null;
-  physicalWorkDir: string | null;
-  readonly relativeGitDir: string | null;
   branch: string;
 }
 
@@ -124,6 +122,10 @@ export function createGitStatusCache(
       };
     },
     refresh: () => {
+      if (repo === null) {
+        requestProbe();
+        return;
+      }
       requestStatsRefresh();
     },
     dispose: () => {
@@ -155,8 +157,6 @@ export function createGitStatusCache(
       repo = {
         headPath: found.headPath,
         gitfilePath: found.gitfilePath,
-        physicalWorkDir: found.physicalWorkDir,
-        relativeGitDir: found.relativeGitDir,
         branch: found.branch,
       };
       stats = { dirty: false, ahead: 0, behind: 0, diffAdded: 0, diffDeleted: 0, fetchedAt: 0 };
@@ -187,7 +187,18 @@ export function createGitStatusCache(
   function becomeNonRepo(): void {
     repo = null;
     nonRepoProbedAt = Date.now();
+    invalidatePullRequest();
     closeWatcher();
+  }
+
+  function invalidatePullRequest(): void {
+    pullRequest = {
+      value: null,
+      branch: null,
+      fetchedAt: 0,
+      pendingBranch: null,
+      requestId: pullRequest.requestId + 1,
+    };
   }
 
   function closeWatcher(): void {
@@ -272,7 +283,7 @@ export function createGitStatusCache(
   async function runStatsRefresh(resolvedGit: string): Promise<void> {
     try {
       if (disposed || repo === null) return;
-      await revalidateRepoContext();
+      await revalidateGitfile();
       if (disposed || repo === null) return;
       const next = await readStats(resolvedGit, workDir);
       if (!disposed && repo !== null && next !== null && !sameStats(stats, next)) {
@@ -288,41 +299,9 @@ export function createGitStatusCache(
     }
   }
 
-  async function revalidateRepoContext(): Promise<void> {
+  async function revalidateGitfile(): Promise<void> {
     const current = repo;
-    if (current === null) return;
-    if (current.physicalWorkDir !== null) {
-      const physical = await physicalDir(workDir);
-      if (disposed || repo !== current) return;
-      if (physical !== current.physicalWorkDir) {
-        if (current.relativeGitDir !== null) {
-          const headPath = join(resolve(physical, current.relativeGitDir), 'HEAD');
-          const branch = await readHeadBranch(headPath);
-          if (disposed || repo !== current) return;
-          if (branch === null) {
-            becomeNonRepo();
-            options.onChange?.();
-            requestProbe();
-            return;
-          }
-          closeWatcher();
-          if (disposed || repo !== current) return;
-          current.headPath = headPath;
-          current.physicalWorkDir = physical;
-          startWatcher(headPath);
-          if (branch !== current.branch) {
-            current.branch = branch;
-            options.onChange?.();
-          }
-          return;
-        }
-        becomeNonRepo();
-        options.onChange?.();
-        requestProbe();
-        return;
-      }
-    }
-    if (current.gitfilePath === null) return;
+    if (current === null || current.gitfilePath === null) return;
     const gitDir = await readGitdirPointer(current.gitfilePath, dirname(current.gitfilePath));
     if (gitDir === null) {
       if (await pathMissing(current.gitfilePath)) {
@@ -345,6 +324,7 @@ export function createGitStatusCache(
     }
     closeWatcher();
     if (disposed || repo !== current) return;
+    invalidatePullRequest();
     current.headPath = headPath;
     startWatcher(headPath);
     if (branch !== current.branch) {
@@ -396,56 +376,39 @@ interface RepoLocation {
   readonly headPath: string;
   readonly branch: string;
   readonly gitfilePath: string | null;
-  readonly physicalWorkDir: string | null;
-  readonly relativeGitDir: string | null;
 }
 
 async function findRepo(workDir: string): Promise<RepoLocation | null> {
   const envGitDir = process.env['GIT_DIR'];
   if (envGitDir !== undefined) {
     const physical = await physicalDir(workDir);
-    const relative = !isAbsolute(envGitDir);
-    const gitDir = relative ? resolve(physical, envGitDir) : envGitDir;
+    const gitDir = isAbsolute(envGitDir) ? envGitDir : resolve(physical, envGitDir);
     const headPath = join(gitDir, 'HEAD');
     const branch = await readHeadBranch(headPath);
-    return branch === null
-      ? null
-      : {
-          headPath,
-          branch,
-          gitfilePath: null,
-          physicalWorkDir: relative ? physical : null,
-          relativeGitDir: relative ? envGitDir : null,
-        };
+    return branch === null ? null : { headPath, branch, gitfilePath: null };
   }
 
   const ceilings = await ceilingDirectories();
   const crossFilesystem = discoveryAcrossFilesystem();
-  const startDir = await physicalDir(workDir);
-  let dir = startDir;
+  let dir = await physicalDir(workDir);
   let device = (await tryStat(dir))?.dev;
   for (;;) {
     const dotGit = join(dir, '.git');
     const dotGitStat = await tryStat(dotGit);
     if (dotGitStat !== null) {
-      const isGitfile = dotGitStat.isFile();
-      const gitDir = dotGitStat.isDirectory()
-        ? dotGit
-        : isGitfile
-          ? await readGitdirPointer(dotGit, dir)
-          : null;
-      if (gitDir === null) return null;
-      const headPath = join(gitDir, 'HEAD');
-      const branch = await readHeadBranch(headPath);
-      return branch === null
-        ? null
-        : {
-            headPath,
-            branch,
-            gitfilePath: isGitfile ? dotGit : null,
-            physicalWorkDir: startDir,
-            relativeGitDir: null,
-          };
+      if (dotGitStat.isDirectory()) {
+        const headPath = join(dotGit, 'HEAD');
+        const branch = await readHeadBranch(headPath);
+        if (branch !== null) {
+          return { headPath, branch, gitfilePath: null };
+        }
+      } else if (dotGitStat.isFile()) {
+        const gitDir = await readGitdirPointer(dotGit, dir);
+        if (gitDir === null) return null;
+        const headPath = join(gitDir, 'HEAD');
+        const branch = await readHeadBranch(headPath);
+        return branch === null ? null : { headPath, branch, gitfilePath: dotGit };
+      }
     }
     const parent = dirname(dir);
     if (parent === dir) return null;

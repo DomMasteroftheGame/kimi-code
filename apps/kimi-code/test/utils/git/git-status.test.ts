@@ -528,69 +528,6 @@ describe('git status cache', () => {
     cache.dispose();
   });
 
-  it('re-discovers the repository when the workDir symlink is retargeted', async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-04-24T00:00:00Z'));
-    const repoA = resolve('/virtual/repo-a');
-    const repoB = resolve('/virtual/repo-b');
-    writeRepo(repoA, 'ref: refs/heads/alpha\n');
-    writeRepo(repoB, 'ref: refs/heads/beta\n');
-    const linked = resolve('/virtual/project');
-    let target = repoA;
-    mocks.fsRealpath.mockImplementation((path: string) =>
-      Promise.resolve(path === linked ? target : path),
-    );
-
-    const onChange = vi.fn();
-    const cache = createGitStatusCache(linked, { onChange });
-    await flushMicrotasks();
-    expect(cache.getStatus()?.branch).toBe('alpha');
-
-    target = repoB;
-    onChange.mockClear();
-    cache.refresh();
-    await flushMicrotasks();
-
-    expect(cache.getStatus()?.branch).toBe('beta');
-    expect(onChange).toHaveBeenCalled();
-    cache.dispose();
-  });
-
-  it('follows a relative GIT_DIR when the workDir symlink is retargeted', async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-04-24T00:00:00Z'));
-    const repoA = resolve('/virtual/repo-a');
-    const repoB = resolve('/virtual/repo-b');
-    fakeFiles.set(join(repoA, 'admin', 'HEAD'), {
-      type: 'file',
-      content: 'ref: refs/heads/alpha\n',
-    });
-    fakeFiles.set(join(repoB, 'admin', 'HEAD'), {
-      type: 'file',
-      content: 'ref: refs/heads/beta\n',
-    });
-    const linked = resolve('/virtual/project');
-    let target = repoA;
-    mocks.fsRealpath.mockImplementation((path: string) =>
-      Promise.resolve(path === linked ? target : path),
-    );
-    process.env['GIT_DIR'] = 'admin';
-
-    const onChange = vi.fn();
-    const cache = createGitStatusCache(linked, { onChange });
-    await flushMicrotasks();
-    expect(cache.getStatus()?.branch).toBe('alpha');
-
-    target = repoB;
-    onChange.mockClear();
-    cache.refresh();
-    await flushMicrotasks();
-
-    expect(cache.getStatus()?.branch).toBe('beta');
-    expect(onChange).toHaveBeenCalled();
-    cache.dispose();
-  });
-
   it('re-resolves gh when the cached executable fails to spawn', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-04-24T00:00:00Z'));
@@ -647,6 +584,70 @@ describe('git status cache', () => {
     await flushMicrotasks();
 
     expect(cache.getStatus()?.branch).toBe('two-space');
+    cache.dispose();
+  });
+
+  it('skips an incomplete nested .git directory and discovers the outer repository', async () => {
+    writeRepo(workDir, 'ref: refs/heads/outer\n');
+    const nested = join(workDir, 'sub');
+    fakeFiles.set(join(nested, '.git'), { type: 'dir' });
+
+    const cache = createGitStatusCache(nested);
+    await flushMicrotasks();
+
+    expect(cache.getStatus()?.branch).toBe('outer');
+    expect(mocks.chokidarWatch).toHaveBeenCalledWith(
+      join(workDir, '.git', 'HEAD'),
+      expect.objectContaining({ usePolling: true }),
+    );
+    cache.dispose();
+  });
+
+  it('probes immediately on refresh() when outside a repository', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-24T00:00:00Z'));
+    const cache = createGitStatusCache(workDir);
+    await flushMicrotasks();
+    expect(cache.getStatus()).toBeNull();
+
+    writeRepo(workDir);
+    cache.refresh();
+    await flushMicrotasks();
+
+    expect(cache.getStatus()?.branch).toBe('main');
+    expect(mocks.chokidarWatch).toHaveBeenCalledTimes(1);
+    cache.dispose();
+  });
+
+  it('invalidates cached pull request metadata when the repository identity changes', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-24T00:00:00Z'));
+    writeRepo(workDir);
+    const cache = createGitStatusCache(workDir);
+    await flushMicrotasks();
+
+    cache.getStatus();
+    await flushMicrotasks();
+    answerGh('{"number":12,"url":"https://github.com/acme/repo/pull/12"}\n');
+    await answerGitRound('## main...origin/main\n');
+    expect(cache.getStatus()?.pullRequest?.number).toBe(12);
+
+    fakeFiles.delete(join(workDir, '.git', 'HEAD'));
+    watchers[0]!.emit('unlink');
+    await flushMicrotasks();
+    expect(cache.getStatus()).toBeNull();
+
+    writeRepo(workDir);
+    cache.refresh();
+    await flushMicrotasks();
+
+    expect(cache.getStatus()?.branch).toBe('main');
+    expect(cache.getStatus()?.pullRequest).toBeNull();
+    await flushMicrotasks();
+    expect(pendingGh).toHaveLength(1);
+    answerGh('{"number":34,"url":"https://github.com/acme/other/pull/34"}\n');
+    await flushMicrotasks();
+    expect(cache.getStatus()?.pullRequest?.number).toBe(34);
     cache.dispose();
   });
 
