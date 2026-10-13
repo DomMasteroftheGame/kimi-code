@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import type { Stats } from 'node:fs';
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, realpath, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 import { watch, type FSWatcher } from 'chokidar';
@@ -257,7 +257,7 @@ export function createGitStatusCache(
     }
     statsRefreshRunning = true;
     stats = { ...stats, fetchedAt: Date.now() };
-    void runStatsRefresh(git);
+    void Promise.resolve().then(() => runStatsRefresh(git));
   }
 
   async function runStatsRefresh(resolvedGit: string): Promise<void> {
@@ -328,7 +328,7 @@ async function findRepo(workDir: string): Promise<RepoLocation | null> {
 
   const ceilings = ceilingDirectories();
   const crossFilesystem = discoveryAcrossFilesystem();
-  let dir = resolve(workDir);
+  let dir = await physicalDir(workDir);
   let device = (await tryStat(dir))?.dev;
   for (;;) {
     const dotGit = join(dir, '.git');
@@ -377,6 +377,14 @@ function ceilingDirectories(): ReadonlySet<string> {
 function normalizeForComparison(path: string): string {
   const resolved = resolve(path);
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+async function physicalDir(workDir: string): Promise<string> {
+  try {
+    return await realpath(workDir);
+  } catch {
+    return resolve(workDir);
+  }
 }
 
 async function tryStat(path: string): Promise<Stats | null> {

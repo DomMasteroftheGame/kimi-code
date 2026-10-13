@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   chokidarWatch: vi.fn(),
   fsStat: vi.fn(),
   fsReadFile: vi.fn(),
+  fsRealpath: vi.fn(),
 }));
 
 vi.mock('node:child_process', () => ({
@@ -16,6 +17,7 @@ vi.mock('node:child_process', () => ({
 vi.mock('node:fs/promises', () => ({
   stat: mocks.fsStat,
   readFile: mocks.fsReadFile,
+  realpath: mocks.fsRealpath,
 }));
 
 vi.mock('#/utils/process/resolve-command', () => ({
@@ -101,6 +103,7 @@ beforeEach(() => {
     if (entry === undefined || entry.type !== 'file') return Promise.reject(enoent(path));
     return Promise.resolve(entry.content);
   });
+  mocks.fsRealpath.mockImplementation((path: string) => Promise.resolve(path));
 });
 
 afterEach(() => {
@@ -139,6 +142,7 @@ function answerGitCalls(result: string | Error, match: (args: string[]) => boole
 }
 
 async function answerGitRound(status: string | Error, diff: string | Error = ''): Promise<void> {
+  await flushMicrotasks();
   answerGitCalls(status, (args) => args.includes('status'));
   await flushMicrotasks();
   answerGitCalls(diff, (args) => args.includes('diff'));
@@ -180,6 +184,7 @@ describe('git status cache', () => {
 
     onChange.mockClear();
     cache.getStatus();
+    await flushMicrotasks();
     expect(pendingGit).toHaveLength(1);
     answerGh(new Error('no pull request'));
     await answerGitRound(STATUS_DIRTY, DIFF_DIRTY);
@@ -223,6 +228,7 @@ describe('git status cache', () => {
       pullRequest: null,
     });
     expect(onChange).toHaveBeenCalledTimes(1);
+    await flushMicrotasks();
     expect(pendingGit).toHaveLength(1);
 
     await answerGitRound(
@@ -257,6 +263,7 @@ describe('git status cache', () => {
     expect(pendingGit).toHaveLength(0);
 
     cache.refresh();
+    await flushMicrotasks();
     expect(pendingGit).toHaveLength(1);
     await answerGitRound('## main...origin/main\n M src/app.ts\n', '6\t2\tsrc/app.ts\n');
     expect(cache.getStatus()?.diffAdded).toBe(6);
@@ -294,6 +301,7 @@ describe('git status cache', () => {
     vi.advanceTimersByTime(999);
     expect(pendingGit).toHaveLength(0);
     vi.advanceTimersByTime(1);
+    await flushMicrotasks();
     expect(pendingGit).toHaveLength(1);
 
     await answerGitRound(STATUS_DIRTY, DIFF_DIRTY);
@@ -388,6 +396,26 @@ describe('git status cache', () => {
     await flushMicrotasks();
 
     expect(cache.getStatus()?.branch).toBe('other-device');
+    cache.dispose();
+  });
+
+  it('resolves a symlinked workDir before walking up', async () => {
+    const physicalRoot = resolve('/virtual/physical-repo');
+    const physicalApp = join(physicalRoot, 'packages', 'app');
+    writeRepo(physicalRoot, 'ref: refs/heads/linked\n');
+    const linked = resolve('/virtual/linked-workdir');
+    mocks.fsRealpath.mockImplementation((path: string) =>
+      Promise.resolve(path === linked ? physicalApp : path),
+    );
+
+    const cache = createGitStatusCache(linked);
+    await flushMicrotasks();
+
+    expect(cache.getStatus()?.branch).toBe('linked');
+    expect(mocks.chokidarWatch).toHaveBeenCalledWith(
+      join(physicalRoot, '.git', 'HEAD'),
+      expect.objectContaining({ usePolling: true }),
+    );
     cache.dispose();
   });
 
@@ -524,6 +552,7 @@ describe('git status cache', () => {
 
     vi.setSystemTime(new Date('2026-04-24T00:01:02Z'));
     cache.getStatus();
+    await flushMicrotasks();
     expect(pendingGit).toHaveLength(1);
     answerGh(new Error('no pull request'));
     await answerGitRound(STATUS_DIRTY, DIFF_DIRTY);
@@ -687,6 +716,7 @@ describe('git status cache', () => {
     await flushMicrotasks();
 
     cache.getStatus();
+    await flushMicrotasks();
     expect(pendingGit).toHaveLength(1);
     onChange.mockClear();
 
