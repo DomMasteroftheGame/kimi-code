@@ -382,6 +382,73 @@ describe('git status cache', () => {
     cache.dispose();
   });
 
+  it('preserves whitespace in ceiling directory paths', async () => {
+    const spacedRoot = resolve('/virtual/spaced ');
+    writeRepo(spacedRoot, 'ref: refs/heads/spaced\n');
+    process.env['GIT_CEILING_DIRECTORIES'] = spacedRoot;
+
+    const cache = createGitStatusCache(join(spacedRoot, 'child'));
+    await flushMicrotasks();
+
+    expect(cache.getStatus()).toBeNull();
+    expect(mocks.chokidarWatch).not.toHaveBeenCalled();
+    cache.dispose();
+  });
+
+  it('follows a gitfile that is repointed to another administration directory', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-24T00:00:00Z'));
+    const gitDirA = join(workDir, 'admin-a');
+    const gitDirB = join(workDir, 'admin-b');
+    fakeFiles.set(join(gitDirA, 'HEAD'), { type: 'file', content: 'ref: refs/heads/alpha\n' });
+    fakeFiles.set(join(gitDirB, 'HEAD'), { type: 'file', content: 'ref: refs/heads/beta\n' });
+    const worktree = join(workDir, 'wt');
+    fakeFiles.set(join(worktree, '.git'), { type: 'file', content: 'gitdir: ../admin-a\n' });
+
+    const onChange = vi.fn();
+    const cache = createGitStatusCache(worktree, { onChange });
+    await flushMicrotasks();
+    expect(cache.getStatus()?.branch).toBe('alpha');
+
+    fakeFiles.set(join(worktree, '.git'), { type: 'file', content: 'gitdir: ../admin-b\n' });
+    onChange.mockClear();
+    cache.refresh();
+    await answerGitRound('## beta...origin/beta\n');
+
+    expect(cache.getStatus()?.branch).toBe('beta');
+    expect(onChange).toHaveBeenCalled();
+    expect(watchers[0]!.close).toHaveBeenCalled();
+    expect(mocks.chokidarWatch).toHaveBeenCalledWith(
+      join(gitDirB, 'HEAD'),
+      expect.objectContaining({ usePolling: true }),
+    );
+    cache.dispose();
+  });
+
+  it('drops the badge when the gitfile is removed', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-24T00:00:00Z'));
+    const gitDir = join(workDir, 'admin');
+    fakeFiles.set(join(gitDir, 'HEAD'), { type: 'file', content: 'ref: refs/heads/alpha\n' });
+    const worktree = join(workDir, 'wt');
+    fakeFiles.set(join(worktree, '.git'), { type: 'file', content: 'gitdir: ../admin\n' });
+
+    const onChange = vi.fn();
+    const cache = createGitStatusCache(worktree, { onChange });
+    await flushMicrotasks();
+    expect(cache.getStatus()?.branch).toBe('alpha');
+    onChange.mockClear();
+
+    fakeFiles.delete(join(worktree, '.git'));
+    cache.refresh();
+    await flushMicrotasks();
+
+    expect(cache.getStatus()).toBeNull();
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(pendingGit).toHaveLength(0);
+    cache.dispose();
+  });
+
   it('treats an explicitly empty GIT_DIR as no repository', async () => {
     writeRepo(workDir);
     process.env['GIT_DIR'] = '';

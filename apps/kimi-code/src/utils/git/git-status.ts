@@ -49,7 +49,8 @@ interface StatsState {
 }
 
 interface RepoState {
-  readonly headPath: string;
+  headPath: string;
+  readonly gitfilePath: string | null;
   branch: string;
 }
 
@@ -149,7 +150,11 @@ export function createGitStatusCache(
     try {
       const found = await findRepo(workDir);
       if (disposed || repo !== null || found === null) return;
-      repo = { headPath: found.headPath, branch: found.branch };
+      repo = {
+        headPath: found.headPath,
+        gitfilePath: found.gitfilePath,
+        branch: found.branch,
+      };
       stats = { dirty: false, ahead: 0, behind: 0, diffAdded: 0, diffDeleted: 0, fetchedAt: 0 };
       startWatcher(found.headPath);
       options.onChange?.();
@@ -263,6 +268,8 @@ export function createGitStatusCache(
   async function runStatsRefresh(resolvedGit: string): Promise<void> {
     try {
       if (disposed || repo === null) return;
+      await revalidateGitfile();
+      if (disposed || repo === null) return;
       const next = await readStats(resolvedGit, workDir);
       if (!disposed && repo !== null && next !== null && !sameStats(stats, next)) {
         stats = { ...next, fetchedAt: Date.now() };
@@ -274,6 +281,28 @@ export function createGitStatusCache(
         statsRefreshPending = false;
         requestStatsRefresh();
       }
+    }
+  }
+
+  async function revalidateGitfile(): Promise<void> {
+    const current = repo;
+    if (current === null || current.gitfilePath === null) return;
+    const gitDir = await readGitdirPointer(current.gitfilePath, dirname(current.gitfilePath));
+    const headPath = gitDir === null ? null : join(gitDir, 'HEAD');
+    if (headPath !== null && headPath === current.headPath) return;
+    closeWatcher();
+    const branch = headPath === null ? null : await readHeadBranch(headPath);
+    if (disposed || repo !== current) return;
+    if (headPath === null || branch === null) {
+      becomeNonRepo();
+      options.onChange?.();
+      return;
+    }
+    current.headPath = headPath;
+    startWatcher(headPath);
+    if (branch !== current.branch) {
+      current.branch = branch;
+      options.onChange?.();
     }
   }
 
@@ -317,6 +346,7 @@ export function createGitStatusCache(
 interface RepoLocation {
   readonly headPath: string;
   readonly branch: string;
+  readonly gitfilePath: string | null;
 }
 
 async function findRepo(workDir: string): Promise<RepoLocation | null> {
@@ -326,7 +356,7 @@ async function findRepo(workDir: string): Promise<RepoLocation | null> {
     const gitDir = isAbsolute(envGitDir) ? envGitDir : resolve(workDir, envGitDir);
     const headPath = join(gitDir, 'HEAD');
     const branch = await readHeadBranch(headPath);
-    return branch === null ? null : { headPath, branch };
+    return branch === null ? null : { headPath, branch, gitfilePath: null };
   }
 
   const ceilings = await ceilingDirectories();
@@ -337,15 +367,18 @@ async function findRepo(workDir: string): Promise<RepoLocation | null> {
     const dotGit = join(dir, '.git');
     const dotGitStat = await tryStat(dotGit);
     if (dotGitStat !== null) {
+      const isGitfile = dotGitStat.isFile();
       const gitDir = dotGitStat.isDirectory()
         ? dotGit
-        : dotGitStat.isFile()
+        : isGitfile
           ? await readGitdirPointer(dotGit, dir)
           : null;
       if (gitDir === null) return null;
       const headPath = join(gitDir, 'HEAD');
       const branch = await readHeadBranch(headPath);
-      return branch === null ? null : { headPath, branch };
+      return branch === null
+        ? null
+        : { headPath, branch, gitfilePath: isGitfile ? dotGit : null };
     }
     const parent = dirname(dir);
     if (parent === dir) return null;
@@ -370,10 +403,7 @@ async function ceilingDirectories(): Promise<ReadonlySet<string>> {
   const raw = process.env['GIT_CEILING_DIRECTORIES'];
   if (raw === undefined) return new Set();
   const separator = process.platform === 'win32' ? ';' : ':';
-  const entries = raw
-    .split(separator)
-    .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0 && isAbsolute(entry));
+  const entries = raw.split(separator).filter((entry) => entry.length > 0 && isAbsolute(entry));
   const normalized = await Promise.all(
     entries.map(async (entry) => {
       try {
