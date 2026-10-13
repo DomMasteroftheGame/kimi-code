@@ -7,13 +7,13 @@ import {
   segmentsFor,
   thinkingAvailability,
 } from '../components/dialogs/model-selector';
+import type { SlashCommandHost } from '../commands/dispatch';
 import {
   effectiveModelForHost,
   hasConversationHistory,
   MODEL_SWITCH_CACHE_WARNING,
   performModelSwitch,
-} from '../commands/config';
-import type { SlashCommandHost } from '../commands/dispatch';
+} from '../utils/model-switch';
 import type { RefreshResult } from '../utils/refresh-providers';
 import { sanitizeShellOutput } from '../utils/shell-output';
 import {
