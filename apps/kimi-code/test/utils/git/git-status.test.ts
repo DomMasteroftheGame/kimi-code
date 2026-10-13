@@ -184,6 +184,7 @@ describe('git status cache', () => {
 
     onChange.mockClear();
     cache.getStatus();
+    expect(pendingGit).toHaveLength(0);
     await flushMicrotasks();
     expect(pendingGit).toHaveLength(1);
     answerGh(new Error('no pull request'));
@@ -396,6 +397,31 @@ describe('git status cache', () => {
     await flushMicrotasks();
 
     expect(cache.getStatus()?.branch).toBe('other-device');
+    cache.dispose();
+  });
+
+  it('does not spawn git or gh when disposed before the deferred refresh runs', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-24T00:00:00Z'));
+    writeRepo(workDir);
+    const cache = createGitStatusCache(workDir);
+    await flushMicrotasks();
+
+    cache.getStatus();
+    cache.dispose();
+    await flushMicrotasks();
+
+    expect(mocks.execFile).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the lexical workDir when realpath fails', async () => {
+    writeRepo(workDir);
+    mocks.fsRealpath.mockRejectedValue(new Error('EACCES'));
+
+    const cache = createGitStatusCache(workDir);
+    await flushMicrotasks();
+
+    expect(cache.getStatus()?.branch).toBe('main');
     cache.dispose();
   });
 

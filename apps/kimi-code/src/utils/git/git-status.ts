@@ -262,6 +262,7 @@ export function createGitStatusCache(
 
   async function runStatsRefresh(resolvedGit: string): Promise<void> {
     try {
+      if (disposed || repo === null) return;
       const next = await readStats(resolvedGit, workDir);
       if (!disposed && repo !== null && next !== null && !sameStats(stats, next)) {
         stats = { ...next, fetchedAt: Date.now() };
@@ -292,6 +293,7 @@ export function createGitStatusCache(
 
     void Promise.resolve()
       .then(() => {
+        if (disposed) return null;
         if (gh === undefined) gh = resolveCommandPath('gh', workDir);
         return readPullRequest(gh, workDir);
       })
