@@ -68,6 +68,7 @@ beforeEach(() => {
   pendingGit = [];
   pendingGh = [];
   delete process.env['GIT_DIR'];
+  delete process.env['GIT_CEILING_DIRECTORIES'];
   mocks.resolveCommandPath.mockImplementation((command: string) => `/usr/bin/${command}`);
   mocks.chokidarWatch.mockImplementation(() => {
     const watcher = new FakeWatcher();
@@ -302,6 +303,38 @@ describe('git status cache', () => {
     const cache = createGitStatusCache(workDir);
     await flushMicrotasks();
     expect(cache.getStatus()?.branch).toBe('aaaaaaa');
+    cache.dispose();
+  });
+
+  it('shows the short sha for a detached HEAD in a SHA-256 repository', async () => {
+    writeRepo(workDir, `${'b'.repeat(64)}\n`);
+    const cache = createGitStatusCache(workDir);
+    await flushMicrotasks();
+    expect(cache.getStatus()?.branch).toBe('bbbbbbb');
+    cache.dispose();
+  });
+
+  it('stops the walk-up at GIT_CEILING_DIRECTORIES', async () => {
+    const repoRoot = resolve('/virtual');
+    writeRepo(repoRoot, 'ref: refs/heads/parent\n');
+    process.env['GIT_CEILING_DIRECTORIES'] = workDir;
+
+    const cache = createGitStatusCache(workDir);
+    await flushMicrotasks();
+
+    expect(cache.getStatus()).toBeNull();
+    expect(mocks.chokidarWatch).not.toHaveBeenCalled();
+    cache.dispose();
+  });
+
+  it('still checks the ceiling directory itself for a repository', async () => {
+    writeRepo(workDir);
+    process.env['GIT_CEILING_DIRECTORIES'] = workDir;
+
+    const cache = createGitStatusCache(workDir);
+    await flushMicrotasks();
+
+    expect(cache.getStatus()?.branch).toBe('main');
     cache.dispose();
   });
 

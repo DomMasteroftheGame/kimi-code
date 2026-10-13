@@ -63,7 +63,7 @@ interface PullRequestState {
 
 const AHEAD_BEHIND_RE = /\[(?:ahead (\d+))?(?:, )?(?:behind (\d+))?\]/;
 const HEAD_REF_PREFIX = 'ref: refs/heads/';
-const DETACHED_HEAD_RE = /^[0-9a-f]{40}$/i;
+const DETACHED_HEAD_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 
 export function createGitStatusCache(
   workDir: string,
@@ -321,6 +321,7 @@ async function findRepo(workDir: string): Promise<RepoLocation | null> {
     return branch === null ? null : { headPath, branch };
   }
 
+  const ceilings = ceilingDirectories();
   let dir = resolve(workDir);
   for (;;) {
     const dotGit = join(dir, '.git');
@@ -336,10 +337,24 @@ async function findRepo(workDir: string): Promise<RepoLocation | null> {
       const branch = await readHeadBranch(headPath);
       return branch === null ? null : { headPath, branch };
     }
+    if (ceilings.has(normalizeForComparison(dir))) return null;
     const parent = dirname(dir);
     if (parent === dir) return null;
     dir = parent;
   }
+}
+
+function ceilingDirectories(): ReadonlySet<string> {
+  const raw = process.env['GIT_CEILING_DIRECTORIES'];
+  if (raw === undefined) return new Set();
+  const separator = process.platform === 'win32' ? ';' : ':';
+  const entries = raw.split(separator).filter((entry) => entry.trim().length > 0);
+  return new Set(entries.map(normalizeForComparison));
+}
+
+function normalizeForComparison(path: string): string {
+  const resolved = resolve(path);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
 async function tryStat(path: string): Promise<Stats | null> {
