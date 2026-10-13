@@ -536,7 +536,7 @@ Re-discovers one provider's model metadata from its upstream source and rewrites
 | --- | --- | --- | --- |
 | `provider_id` | path | string | **Required.** Provider id |
 
-On success, `data` is a refresh report: `changed` is an array of `{ provider_id, provider_name, added, removed }` (added/removed alias counts), `unchanged` is an array of provider ids with no diff, and `failed` is an array of `{ provider, reason }`.
+On success, `data` is a refresh report: `changed` is an array of `{ provider_id, provider_name, added, removed }` (added/removed alias counts), `unchanged` is an array of provider ids with no diff, and `failed` is an array of `{ provider, reason }`. When a refresh finds that the registry dropped the current default model and that model had declared an `upgrade` replacement, `data` also carries an optional `retired_default`: `{ from, to, from_model }` — the default model has been redirected to `to`, and `from_model` is the dropped model's record (`provider` / `model` / `max_context_size` / `display_name` / `capabilities` / `support_efforts` / `default_effort` / `adaptive_thinking`). The same field appears on the `event.model_catalog.changed` event.
 
 - `40001`: malformed or unsupported action suffix in the path
 - `40412`: provider not found

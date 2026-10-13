@@ -271,6 +271,7 @@ function withoutKeys<T>(
 }
 
 function mapRefreshResult(result: RefreshResult): RefreshProviderModelsResponse {
+  const retired = result.retiredDefault;
   return {
     changed: result.changed.map((change) => ({
       provider_id: change.providerId,
@@ -283,6 +284,29 @@ function mapRefreshResult(result: RefreshResult): RefreshProviderModelsResponse 
       provider: failure.provider,
       reason: failure.reason,
     })),
+    retired_default:
+      retired === undefined
+        ? undefined
+        : {
+            from: retired.from,
+            to: retired.to,
+            from_model: {
+              provider: retired.fromModel.provider,
+              model: retired.fromModel.model,
+              max_context_size: retired.fromModel.maxContextSize,
+              display_name: retired.fromModel.displayName,
+              capabilities:
+                retired.fromModel.capabilities === undefined
+                  ? undefined
+                  : [...retired.fromModel.capabilities],
+              support_efforts:
+                retired.fromModel.supportEfforts === undefined
+                  ? undefined
+                  : [...retired.fromModel.supportEfforts],
+              default_effort: retired.fromModel.defaultEffort,
+              adaptive_thinking: retired.fromModel.adaptiveThinking,
+            },
+          },
   };
 }
 

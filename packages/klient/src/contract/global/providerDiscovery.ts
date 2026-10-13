@@ -13,7 +13,8 @@ export const refreshProviderModelsOptionsSchema = z.object({
   providerId: z.string().optional(),
 });
 
-/** Same shape as `refreshOAuthProviderModelsResponseSchema` in `./auth.js` — keep in sync. */
+/** Same shape as `refreshOAuthProviderModelsResponseSchema` in `./auth.js`, plus the
+ * optional `retired_default` the OAuth-only login refresh never produces. */
 export const refreshProviderModelsResponseSchema = z.object({
   changed: z.array(
     z.object({
@@ -25,6 +26,22 @@ export const refreshProviderModelsResponseSchema = z.object({
   ),
   unchanged: z.array(z.string()),
   failed: z.array(z.object({ provider: z.string(), reason: z.string() })),
+  retired_default: z
+    .object({
+      from: z.string(),
+      to: z.string(),
+      from_model: z.object({
+        provider: z.string(),
+        model: z.string(),
+        max_context_size: z.number(),
+        display_name: z.string().optional(),
+        capabilities: z.array(z.string()).optional(),
+        support_efforts: z.array(z.string()).optional(),
+        default_effort: z.string().optional(),
+        adaptive_thinking: z.boolean().optional(),
+      }),
+    })
+    .optional(),
 });
 
 export const providerDiscoveryContract = {

@@ -18,10 +18,30 @@ export const providerRefreshFailureSchema = z.object({
 });
 export type ProviderRefreshFailure = z.infer<typeof providerRefreshFailureSchema>;
 
+export const retiredDefaultModelSchema = z.object({
+  provider: z.string().min(1),
+  model: z.string().min(1),
+  max_context_size: z.number(),
+  display_name: z.string().min(1).optional(),
+  capabilities: z.array(z.string().min(1)).optional(),
+  support_efforts: z.array(z.string().min(1)).optional(),
+  default_effort: z.string().min(1).optional(),
+  adaptive_thinking: z.boolean().optional(),
+});
+export type RetiredDefaultModel = z.infer<typeof retiredDefaultModelSchema>;
+
+export const retiredDefaultSchema = z.object({
+  from: z.string().min(1),
+  to: z.string().min(1),
+  from_model: retiredDefaultModelSchema,
+});
+export type RetiredDefault = z.infer<typeof retiredDefaultSchema>;
+
 export const refreshProviderModelsResponseSchema = z.object({
   changed: z.array(providerRefreshChangeSchema),
   unchanged: z.array(z.string().min(1)),
   failed: z.array(providerRefreshFailureSchema),
+  retired_default: retiredDefaultSchema.optional(),
 });
 export type RefreshProviderModelsResponse = z.infer<
   typeof refreshProviderModelsResponseSchema
@@ -43,6 +63,7 @@ export interface ModelCatalogChangedEvent {
   readonly changed: readonly ProviderRefreshChange[];
   readonly unchanged: readonly string[];
   readonly failed: readonly ProviderRefreshFailure[];
+  readonly retired_default?: RetiredDefault;
 }
 
 export interface RefreshProviderModelsOptions {

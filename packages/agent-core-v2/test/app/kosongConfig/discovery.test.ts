@@ -279,6 +279,88 @@ describe('refreshProviderModels modelSource short-circuit', () => {
     }
   });
 
+  it('reports retired_default when the registry drops the default model', async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            acme: {
+              id: 'acme',
+              name: 'Acme',
+              api: 'https://acme.example.test/v1',
+              type: 'openai',
+              models: {
+                next: { id: 'next', default_effort: 'high' },
+              },
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { host, config, discovery, events } = await createHost({
+      providers: {
+        ...staticProviders,
+        acme: {
+          type: 'openai',
+          apiKey: 'sk-acme',
+          source: { kind: 'apiJson', url: 'https://registry.example.test/api.json', apiKey: 'sk-registry' },
+        },
+      },
+      models: {
+        ...staticModels,
+        'acme/current': {
+          provider: 'acme',
+          model: 'current',
+          maxContextSize: 131072,
+          capabilities: ['tool_use'],
+          displayName: 'Current',
+          supportEfforts: ['low', 'high'],
+          defaultEffort: 'high',
+          upgrade: { model: 'acme/next', migrationMarkdown: 'Use next' },
+        },
+        'acme/next': {
+          provider: 'acme',
+          model: 'next',
+          maxContextSize: 131072,
+          capabilities: ['tool_use'],
+          displayName: 'next',
+          defaultEffort: 'high',
+        },
+      },
+      defaultModel: 'acme/current',
+      thinking: { enabled: true },
+    });
+    try {
+      const result = await discovery.refreshProviderModels({ scope: 'all' });
+      expect(result).toEqual({
+        changed: [{ provider_id: 'acme', provider_name: 'Acme', added: 0, removed: 1 }],
+        unchanged: [],
+        failed: [],
+        retired_default: {
+          from: 'acme/current',
+          to: 'acme/next',
+          from_model: {
+            provider: 'acme',
+            model: 'current',
+            max_context_size: 131072,
+            display_name: 'Current',
+            capabilities: ['tool_use'],
+            support_efforts: ['low', 'high'],
+            default_effort: 'high',
+          },
+        },
+      });
+      expect(config.get<string>('defaultModel')).toBe('acme/next');
+      expect(events.published).toEqual([
+        expect.objectContaining({ type: 'event.model_catalog.changed', payload: result }),
+      ]);
+    } finally {
+      host.dispose();
+    }
+  });
+
   it('throws provider.not_found for an unknown scoped provider', async () => {
     const { host, discovery } = await createHost(staticSections);
     try {

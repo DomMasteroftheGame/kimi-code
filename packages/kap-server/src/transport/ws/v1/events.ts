@@ -119,11 +119,29 @@ export interface ModelCatalogRefreshFailure {
   readonly reason: string;
 }
 
+export interface ModelCatalogRetiredDefaultModel {
+  readonly provider: string;
+  readonly model: string;
+  readonly max_context_size: number;
+  readonly display_name?: string;
+  readonly capabilities?: readonly string[];
+  readonly support_efforts?: readonly string[];
+  readonly default_effort?: string;
+  readonly adaptive_thinking?: boolean;
+}
+
+export interface ModelCatalogRetiredDefault {
+  readonly from: string;
+  readonly to: string;
+  readonly from_model: ModelCatalogRetiredDefaultModel;
+}
+
 export interface ModelCatalogChangedEvent {
   readonly type: 'event.model_catalog.changed';
   readonly changed: readonly ModelCatalogRefreshChange[];
   readonly unchanged: readonly string[];
   readonly failed: readonly ModelCatalogRefreshFailure[];
+  readonly retired_default?: ModelCatalogRetiredDefault;
 }
 
 export interface PluginChangedEvent {
